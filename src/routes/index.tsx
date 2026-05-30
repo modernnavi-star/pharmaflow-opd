@@ -92,6 +92,8 @@ const LOCAL_ENTRIES_KEY = "pharmastock-local-entries";
 const LOCAL_CUSTOM_MEDICINES_KEY = "pharmastock-custom-medicines";
 const LOCAL_DELETED_MEDICINES_KEY = "pharmastock-deleted-medicines";
 const LOCAL_GOOGLE_SHEETS_URL_KEY = "pharmastock-google-sheets-url";
+const DEFAULT_GOOGLE_SHEETS_URL =
+  "https://script.google.com/macros/s/AKfycbybJCQ9jLVQcxU7bxzByBO9lLdgPoDWDgaQefGwpfPcM1E2_E9qpKFmLbwPBcIzcA1Dig/exec";
 
 type PackType = "tablets" | "sheets" | "boxes";
 
@@ -162,13 +164,57 @@ const getLocalEntries = (): LocalReportEntry[] => {
 };
 
 const getGoogleSheetsUrl = () => {
-  if (typeof window === "undefined") return "";
-  return window.localStorage.getItem(LOCAL_GOOGLE_SHEETS_URL_KEY) ?? "";
+  if (typeof window === "undefined") return DEFAULT_GOOGLE_SHEETS_URL;
+  return window.localStorage.getItem(LOCAL_GOOGLE_SHEETS_URL_KEY) || DEFAULT_GOOGLE_SHEETS_URL;
 };
 
 const setGoogleSheetsUrl = (url: string) => {
   if (typeof window === "undefined") return;
   window.localStorage.setItem(LOCAL_GOOGLE_SHEETS_URL_KEY, url.trim());
+};
+
+const setLocalEntries = (entries: LocalReportEntry[]) => {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(LOCAL_ENTRIES_KEY, JSON.stringify(entries));
+};
+
+const applyEntriesToLocalStocks = (entries: LocalReportEntry[]) => {
+  if (typeof window === "undefined") return;
+  const latestByMedicine = new Map<string, LocalReportEntry>();
+  entries
+    .slice()
+    .sort((a, b) => `${a.entry_date}-${a.id}`.localeCompare(`${b.entry_date}-${b.id}`))
+    .forEach((entry) => latestByMedicine.set(entry.medicine_id, entry));
+  const localStocks = getLocalStocks();
+  latestByMedicine.forEach((entry) => {
+    localStocks[entry.medicine_id] = Number(entry.closing_stock || 0);
+  });
+  window.localStorage.setItem(LOCAL_STOCK_KEY, JSON.stringify(localStocks));
+};
+
+const mergeRemoteEntries = (remoteEntries: LocalReportEntry[]) => {
+  if (!remoteEntries.length) return 0;
+  const map = new Map<string, LocalReportEntry>();
+  getLocalEntries().forEach((entry) => map.set(entry.id, entry));
+  remoteEntries.forEach((entry) => entry.id && map.set(entry.id, entry));
+  const merged = Array.from(map.values()).sort((a, b) => a.entry_date.localeCompare(b.entry_date));
+  setLocalEntries(merged);
+  applyEntriesToLocalStocks(merged);
+  return remoteEntries.length;
+};
+
+const pullEntriesFromGoogleSheet = async () => {
+  const url = getGoogleSheetsUrl();
+  if (!url) return 0;
+  try {
+    const separator = url.includes("?") ? "&" : "?";
+    const response = await fetch(`${url}${separator}mode=entries&ts=${Date.now()}`);
+    const data = (await response.json()) as { entries?: LocalReportEntry[] };
+    return mergeRemoteEntries(data.entries ?? []);
+  } catch (error) {
+    console.info("Google Sheets pull sync failed; using local data", error);
+    return 0;
+  }
 };
 
 const syncEntryToGoogleSheet = async (entry: LocalReportEntry) => {
@@ -179,7 +225,7 @@ const syncEntryToGoogleSheet = async (entry: LocalReportEntry) => {
       method: "POST",
       mode: "no-cors",
       headers: { "Content-Type": "text/plain;charset=utf-8" },
-      body: JSON.stringify({ type: "stock_entry", entry }),
+      body: JSON.stringify({ type: "upsert_stock_entry", entry }),
     });
   } catch (error) {
     console.info("Google Sheets sync failed; local data is still saved", error);
@@ -364,6 +410,7 @@ export function StockApp() {
   const loadMedicines = async () => {
     // Always show the embedded catalog first so the Android app works even
     // when Supabase env vars or network are unavailable.
+    await pullEntriesFromGoogleSheet();
     setMedicines(getEmbeddedMedicines());
     setLoading(false);
 
@@ -714,6 +761,16 @@ function SettingsSection({
     );
   };
 
+  const syncNow = async () => {
+    const count = await pullEntriesFromGoogleSheet();
+    onMedicinesChanged();
+    toast.success(
+      count
+        ? `Synced ${count} entries from Google Sheets`
+        : "Sync checked. No new sheet data found.",
+    );
+  };
+
   const addMedicine = () => {
     if (!name.trim()) {
       toast.error("Medicine name is required.");
@@ -782,6 +839,9 @@ function SettingsSection({
               />
               <Button type="button" onClick={saveSheetUrl}>
                 Save URL
+              </Button>
+              <Button type="button" variant="outline" onClick={syncNow}>
+                Sync now
               </Button>
             </div>
           </div>

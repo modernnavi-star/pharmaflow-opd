@@ -1,15 +1,14 @@
 /**
  * PHC AKKIRAMPURA PHARMACY DATA - Google Sheets Backend
+ * Two-way sync version.
  *
  * How to use:
  * 1. Open https://script.google.com
- * 2. Create New Project
+ * 2. Create New Project or open your existing backend project
  * 3. Paste this full code into Code.gs
  * 4. Click Run → setupPharmacySheet once and authorize
- * 5. Deploy → New deployment → Web app
- * 6. Execute as: Me
- * 7. Who has access: Anyone
- * 8. Copy Web App URL and paste it in app Settings → Google Sheets backend sync.
+ * 5. Deploy → Manage deployments → Edit → New version → Deploy
+ * 6. Copy Web App URL into app Settings if needed.
  */
 
 const SHEET_NAME = 'PharmacyData';
@@ -40,22 +39,35 @@ function setupPharmacySheet() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   let sheet = ss.getSheetByName(SHEET_NAME);
   if (!sheet) sheet = ss.insertSheet(SHEET_NAME);
-  sheet.clear();
-  sheet.getRange(1, 1, 1, HEADERS.length).setValues([HEADERS]);
+
+  if (sheet.getLastRow() === 0) {
+    sheet.getRange(1, 1, 1, HEADERS.length).setValues([HEADERS]);
+  } else {
+    sheet.getRange(1, 1, 1, HEADERS.length).setValues([HEADERS]);
+  }
+
   sheet.getRange(1, 1, 1, HEADERS.length)
     .setFontWeight('bold')
     .setBackground('#0f766e')
     .setFontColor('#ffffff');
   sheet.setFrozenRows(1);
   sheet.autoResizeColumns(1, HEADERS.length);
-  return 'PharmacyData sheet created successfully.';
+  return 'PharmacyData sheet is ready.';
 }
 
-function doGet() {
+function doGet(e) {
   setupPharmacySheetIfMissing_();
-  return ContentService
-    .createTextOutput(JSON.stringify({ ok: true, message: 'PHC Akkirampura Pharmacy backend is running' }))
-    .setMimeType(ContentService.MimeType.JSON);
+  const mode = e && e.parameter && e.parameter.mode;
+
+  if (mode === 'entries') {
+    return json_({ ok: true, entries: getEntries_() });
+  }
+
+  return json_({
+    ok: true,
+    message: 'PHC Akkirampura Pharmacy backend is running',
+    entries: getEntries_().length
+  });
 }
 
 function doPost(e) {
@@ -63,14 +75,15 @@ function doPost(e) {
     setupPharmacySheetIfMissing_();
     const body = JSON.parse(e.postData && e.postData.contents ? e.postData.contents : '{}');
     const entry = body.entry || body;
-    appendEntry_(entry);
-    return ContentService
-      .createTextOutput(JSON.stringify({ ok: true }))
-      .setMimeType(ContentService.MimeType.JSON);
+
+    if (!entry.id) {
+      entry.id = Utilities.getUuid();
+    }
+
+    upsertEntry_(entry);
+    return json_({ ok: true, id: entry.id });
   } catch (error) {
-    return ContentService
-      .createTextOutput(JSON.stringify({ ok: false, error: String(error) }))
-      .setMimeType(ContentService.MimeType.JSON);
+    return json_({ ok: false, error: String(error) });
   }
 }
 
@@ -81,20 +94,37 @@ function setupPharmacySheetIfMissing_() {
     setupPharmacySheet();
     return;
   }
-  const firstCell = sheet.getRange(1, 1).getValue();
-  if (firstCell !== HEADERS[0]) {
-    sheet.getRange(1, 1, 1, HEADERS.length).setValues([HEADERS]);
-    sheet.getRange(1, 1, 1, HEADERS.length)
-      .setFontWeight('bold')
-      .setBackground('#0f766e')
-      .setFontColor('#ffffff');
-    sheet.setFrozenRows(1);
+  if (sheet.getRange(1, 1).getValue() !== HEADERS[0]) {
+    setupPharmacySheet();
   }
 }
 
-function appendEntry_(entry) {
+function upsertEntry_(entry) {
   const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAME);
-  sheet.appendRow([
+  const row = entryToRow_(entry);
+  const rowIndex = findRowByEntryId_(entry.id);
+
+  if (rowIndex > 1) {
+    sheet.getRange(rowIndex, 1, 1, HEADERS.length).setValues([row]);
+  } else {
+    sheet.appendRow(row);
+  }
+}
+
+function findRowByEntryId_(entryId) {
+  if (!entryId) return -1;
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAME);
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return -1;
+  const ids = sheet.getRange(2, 2, lastRow - 1, 1).getValues();
+  for (let i = 0; i < ids.length; i++) {
+    if (String(ids[i][0]) === String(entryId)) return i + 2;
+  }
+  return -1;
+}
+
+function entryToRow_(entry) {
+  return [
     new Date(),
     entry.id || '',
     entry.entry_date || '',
@@ -115,5 +145,49 @@ function appendEntry_(entry) {
     entry.issue_pack_type || '',
     Number(entry.issue_pack_qty || 0),
     entry.notes || ''
-  ]);
+  ];
+}
+
+function getEntries_() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAME);
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return [];
+
+  return sheet.getRange(2, 1, lastRow - 1, HEADERS.length).getValues()
+    .filter(row => row[1] || row[4])
+    .map(row => ({
+      id: String(row[1] || Utilities.getUuid()),
+      entry_date: formatDate_(row[2]),
+      medicine_id: String(row[3] || ''),
+      medicine_name: String(row[4] || ''),
+      generic_name: row[5] ? String(row[5]) : null,
+      strength: row[6] ? String(row[6]) : null,
+      form: row[7] ? String(row[7]) : null,
+      category: row[8] ? String(row[8]) : null,
+      opening_stock: Number(row[9] || 0),
+      received: Number(row[10] || 0),
+      dispensed: Number(row[11] || 0),
+      closing_stock: Number(row[12] || 0),
+      batch_no: row[13] ? String(row[13]) : null,
+      expiry_date: row[14] ? formatDate_(row[14]) : null,
+      received_pack_type: String(row[15] || 'tablets'),
+      received_pack_qty: Number(row[16] || 0),
+      issue_pack_type: String(row[17] || 'tablets'),
+      issue_pack_qty: Number(row[18] || 0),
+      notes: row[19] ? String(row[19]) : null
+    }));
+}
+
+function formatDate_(value) {
+  if (!value) return '';
+  if (Object.prototype.toString.call(value) === '[object Date]') {
+    return Utilities.formatDate(value, Session.getScriptTimeZone(), 'yyyy-MM-dd');
+  }
+  return String(value);
+}
+
+function json_(obj) {
+  return ContentService
+    .createTextOutput(JSON.stringify(obj))
+    .setMimeType(ContentService.MimeType.JSON);
 }
