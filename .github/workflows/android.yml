@@ -1,4 +1,4 @@
-name: Web CI
+name: Android CI
 
 on:
   push:
@@ -19,17 +19,36 @@ jobs:
         with:
           node-version: 22
 
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+          cache: gradle
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
       - name: Install dependencies
         run: npm install
 
       - name: Run lint
         run: npm run lint
 
-      - name: Build app
-        run: npm run build
+      - name: Sync Android project
+        run: npm run android:sync
         env:
           SUPABASE_URL: https://example.supabase.co
           SUPABASE_PUBLISHABLE_KEY: dummy-publishable-key
           VITE_SUPABASE_PROJECT_ID: dummy-project
           VITE_SUPABASE_URL: https://example.supabase.co
           VITE_SUPABASE_PUBLISHABLE_KEY: dummy-publishable-key
+
+      - name: Build debug APK
+        run: cd android && ./gradlew assembleDebug
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: pharmastock-opd-debug-apk
+          path: android/app/build/outputs/apk/debug/*.apk

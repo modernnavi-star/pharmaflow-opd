@@ -86,7 +86,7 @@ type StockEntry = {
 
 const today = () => new Date().toISOString().slice(0, 10);
 
-function StockApp() {
+export function StockApp() {
   const [medicines, setMedicines] = useState<Medicine[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");

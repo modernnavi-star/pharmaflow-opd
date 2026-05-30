@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">PharmaStock OPD</string>
+    <string name="title_activity_main">PharmaStock OPD</string>
+    <string name="package_name">com.pharmaflow.opd</string>
+    <string name="custom_url_scheme">com.pharmaflow.opd</string>
+</resources>
