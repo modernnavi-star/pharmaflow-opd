@@ -173,6 +173,40 @@ const setGoogleSheetsUrl = (url: string) => {
   window.localStorage.setItem(LOCAL_GOOGLE_SHEETS_URL_KEY, url.trim());
 };
 
+const fetchGoogleSheetJsonp = (url: string): Promise<{ entries?: LocalReportEntry[] }> => {
+  return new Promise((resolve, reject) => {
+    if (typeof window === "undefined") return resolve({ entries: [] });
+    const callbackName = `pharmacySheetCallback_${Date.now()}_${Math.random()
+      .toString(36)
+      .slice(2)}`;
+    const script = document.createElement("script");
+    const separator = url.includes("?") ? "&" : "?";
+    const timeout = window.setTimeout(() => {
+      delete (window as Window & Record<string, unknown>)[callbackName];
+      script.remove();
+      reject(new Error("Google Sheets sync timed out"));
+    }, 15000);
+
+    (window as Window & Record<string, (data: { entries?: LocalReportEntry[] }) => void>)[
+      callbackName
+    ] = (data) => {
+      window.clearTimeout(timeout);
+      delete (window as Window & Record<string, unknown>)[callbackName];
+      script.remove();
+      resolve(data);
+    };
+
+    script.onerror = () => {
+      window.clearTimeout(timeout);
+      delete (window as Window & Record<string, unknown>)[callbackName];
+      script.remove();
+      reject(new Error("Google Sheets sync script failed"));
+    };
+    script.src = `${url}${separator}mode=entries&callback=${callbackName}&ts=${Date.now()}`;
+    document.body.appendChild(script);
+  });
+};
+
 const setLocalEntries = (entries: LocalReportEntry[]) => {
   if (typeof window === "undefined") return;
   window.localStorage.setItem(LOCAL_ENTRIES_KEY, JSON.stringify(entries));
@@ -207,9 +241,9 @@ const pullEntriesFromGoogleSheet = async () => {
   const url = getGoogleSheetsUrl();
   if (!url) return 0;
   try {
-    const separator = url.includes("?") ? "&" : "?";
-    const response = await fetch(`${url}${separator}mode=entries&ts=${Date.now()}`);
-    const data = (await response.json()) as { entries?: LocalReportEntry[] };
+    // Apps Script often blocks normal CORS reads in Android WebView.
+    // JSONP works reliably for read/two-way restore.
+    const data = await fetchGoogleSheetJsonp(url);
     return mergeRemoteEntries(data.entries ?? []);
   } catch (error) {
     console.info("Google Sheets pull sync failed; using local data", error);
@@ -267,36 +301,32 @@ const downloadTextFile = (filename: string, content: string, type: string) => {
   URL.revokeObjectURL(url);
 };
 
-const saveAndShareFile = async (filename: string, data: string, mimeType: string) => {
-  try {
-    const { Filesystem, Directory, Encoding } = await import("@capacitor/filesystem");
-    const { Share } = await import("@capacitor/share");
-    const saved = await Filesystem.writeFile({
-      path: filename,
-      data,
-      directory: Directory.Documents,
-      encoding: Encoding.UTF8,
-    });
-    await Share.share({
-      title: filename,
-      text: `Generated ${filename}`,
-      url: saved.uri,
-      dialogTitle: "Share report",
-    });
-  } catch (error) {
-    console.info("Capacitor file share unavailable; using browser download", error);
-    downloadTextFile(filename, data, mimeType);
-  }
+const downloadBase64File = (filename: string, base64Data: string, mimeType: string) => {
+  if (typeof window === "undefined") return;
+  const a = document.createElement("a");
+  a.href = `data:${mimeType};base64,${base64Data}`;
+  a.download = filename;
+  a.click();
 };
 
-const saveAndShareBase64File = async (filename: string, base64Data: string) => {
+const toBase64 = (text: string) => {
+  const bytes = new TextEncoder().encode(text);
+  let binary = "";
+  bytes.forEach((byte) => {
+    binary += String.fromCharCode(byte);
+  });
+  return btoa(binary);
+};
+
+const saveAndShareTextFile = async (filename: string, data: string, mimeType: string) => {
+  const base64Data = toBase64(data);
   try {
     const { Filesystem, Directory } = await import("@capacitor/filesystem");
     const { Share } = await import("@capacitor/share");
     const saved = await Filesystem.writeFile({
       path: filename,
       data: base64Data,
-      directory: Directory.Documents,
+      directory: Directory.Cache,
     });
     await Share.share({
       title: filename,
@@ -304,9 +334,36 @@ const saveAndShareBase64File = async (filename: string, base64Data: string) => {
       url: saved.uri,
       dialogTitle: "Share report",
     });
+    toast.success(`${filename} generated`);
   } catch (error) {
-    console.info("Capacitor PDF share unavailable", error);
-    toast.error("Could not save PDF on this device.");
+    console.info("Capacitor file share unavailable; using browser download", error);
+    downloadBase64File(filename, base64Data, mimeType);
+  }
+};
+
+const saveAndShareBase64File = async (
+  filename: string,
+  base64Data: string,
+  mimeType = "application/pdf",
+) => {
+  try {
+    const { Filesystem, Directory } = await import("@capacitor/filesystem");
+    const { Share } = await import("@capacitor/share");
+    const saved = await Filesystem.writeFile({
+      path: filename,
+      data: base64Data,
+      directory: Directory.Cache,
+    });
+    await Share.share({
+      title: filename,
+      text: `Generated ${filename}`,
+      url: saved.uri,
+      dialogTitle: "Share report",
+    });
+    toast.success(`${filename} generated`);
+  } catch (error) {
+    console.info("Capacitor PDF share unavailable; using browser download", error);
+    downloadBase64File(filename, base64Data, mimeType);
   }
 };
 
@@ -1108,8 +1165,26 @@ function ReportsSection({ date, medicines }: { date: string; medicines: Medicine
       "Expiry",
       "Notes",
     ];
-    const csv = [headers, ...exportRows].map((row) => row.map(escapeCsv).join(",")).join("\n");
-    await saveAndShareFile(`phc-akkirampura-${mode}-${date}.csv`, csv, "text/csv;charset=utf-8");
+    const rows = [headers, ...exportRows];
+    const html = `<!doctype html><html><head><meta charset="utf-8" /></head><body><table border="1"><caption><b>PHC AKKIRAMPURA PHARMACY DATA - ${title}</b></caption>${rows
+      .map(
+        (row, index) =>
+          `<tr>${row
+            .map((cell) => {
+              const safe = String(cell ?? "").replace(
+                /[&<>]/g,
+                (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[char]!,
+              );
+              return index === 0 ? `<th>${safe}</th>` : `<td>${safe}</td>`;
+            })
+            .join("")}</tr>`,
+      )
+      .join("")}</table></body></html>`;
+    await saveAndShareTextFile(
+      `phc-akkirampura-${mode}-${date}.xls`,
+      html,
+      "application/vnd.ms-excel;charset=utf-8",
+    );
   };
 
   const exportPdf = async () => {

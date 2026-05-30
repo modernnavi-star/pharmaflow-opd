@@ -58,16 +58,26 @@ function setupPharmacySheet() {
 function doGet(e) {
   setupPharmacySheetIfMissing_();
   const mode = e && e.parameter && e.parameter.mode;
+  const callback = e && e.parameter && e.parameter.callback;
 
+  let payload;
   if (mode === 'entries') {
-    return json_({ ok: true, entries: getEntries_() });
+    payload = { ok: true, entries: getEntries_() };
+  } else {
+    payload = {
+      ok: true,
+      message: 'PHC Akkirampura Pharmacy backend is running',
+      entries: getEntries_().length
+    };
   }
 
-  return json_({
-    ok: true,
-    message: 'PHC Akkirampura Pharmacy backend is running',
-    entries: getEntries_().length
-  });
+  if (callback) {
+    return ContentService
+      .createTextOutput(callback + '(' + JSON.stringify(payload) + ');')
+      .setMimeType(ContentService.MimeType.JAVASCRIPT);
+  }
+
+  return json_(payload);
 }
 
 function doPost(e) {

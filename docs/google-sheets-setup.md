@@ -57,6 +57,18 @@ The provided URL is embedded by default. If you need to change it:
 4. Tap **Save URL**
 5. Tap **Sync now** to pull sheet data into the app
 
+## Important for two-way sync / Android
+
+The latest backend supports **JSONP** for app-to-sheet restore, because Android WebView may block normal cross-origin JSON fetches from Google Apps Script.
+
+After pasting the latest `docs/google-sheets-backend.gs`, you must redeploy:
+
+```txt
+Deploy → Manage deployments → Edit pencil → Version: New version → Deploy
+```
+
+If you do not redeploy a new version, **Sync now will not work**.
+
 ## Two-way sync behavior
 
 ### App → Google Sheet
@@ -72,7 +84,7 @@ Whenever a stock entry is saved in the app:
 
 When the app starts, and when **Sync now** is tapped:
 
-- It downloads all rows from Google Sheets
+- It downloads all rows from Google Sheets using JSONP restore mode
 - Merges them into local app data by Entry ID
 - Rebuilds local current stock from closing stock
 
