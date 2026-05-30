@@ -450,10 +450,11 @@ export function StockApp() {
       <Header date={date} setDate={setDate} />
 
       <main className="mx-auto w-full max-w-6xl px-4 pb-24 pt-6 sm:pt-8">
+        <UsefulLinksSection />
         <ReportsSection date={date} medicines={medicines} />
         <QuickCommandBox onApply={applyQuickCommand} />
 
-        <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:items-center">
+        <div id="drug-search" className="mt-6 flex flex-col gap-3 sm:flex-row sm:items-center">
           <div className="relative flex-1">
             <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
             <Input
@@ -545,6 +546,56 @@ export function StockApp() {
   );
 }
 
+function UsefulLinksSection() {
+  const openExternal = (url: string) => {
+    if (typeof window === "undefined") return;
+    window.open(url, "_blank", "noopener,noreferrer");
+  };
+
+  const links = [
+    {
+      label: "Search drug list",
+      description: "Find medicine by name, generic, strength or category",
+      action: () => document.getElementById("drug-search")?.scrollIntoView({ behavior: "smooth" }),
+    },
+    {
+      label: "Reports / export",
+      description: "Daily, monthly, yearly PDF and Excel reports",
+      action: () =>
+        document.getElementById("reports-section")?.scrollIntoView({ behavior: "smooth" }),
+    },
+    {
+      label: "Voice stock entry",
+      description: "Speak or type add / dispense medicine commands",
+      action: () => document.getElementById("voice-entry")?.scrollIntoView({ behavior: "smooth" }),
+    },
+    {
+      label: "Official EML reference",
+      description: "Open Government essential medicine information online",
+      action: () => openExternal("https://nhm.gov.in"),
+    },
+  ];
+
+  return (
+    <Card className="mt-4 p-3">
+      <div className="text-sm font-semibold">Useful links</div>
+      <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
+        {links.map((link) => (
+          <button
+            key={link.label}
+            type="button"
+            onClick={link.action}
+            className="rounded-lg border border-border bg-background p-3 text-left transition hover:border-primary/40 hover:bg-muted/40"
+          >
+            <div className="font-medium">{link.label}</div>
+            <div className="mt-0.5 text-xs text-muted-foreground">{link.description}</div>
+          </button>
+        ))}
+      </div>
+    </Card>
+  );
+}
+
 function QuickCommandBox({ onApply }: { onApply: (command: string) => void }) {
   const [command, setCommand] = useState("");
   const [listening, setListening] = useState(false);
@@ -606,7 +657,7 @@ function QuickCommandBox({ onApply }: { onApply: (command: string) => void }) {
   };
 
   return (
-    <Card className="mt-4 p-3">
+    <Card id="voice-entry" className="mt-4 p-3">
       <div className="flex items-center justify-between gap-2">
         <div>
           <div className="text-sm font-semibold">AI voice / typing stock entry</div>
@@ -760,7 +811,7 @@ function ReportsSection({ date, medicines }: { date: string; medicines: Medicine
   };
 
   return (
-    <Card className="mt-4 p-3">
+    <Card id="reports-section" className="mt-4 p-3">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <div className="text-sm font-semibold">Reports</div>
