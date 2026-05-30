@@ -735,7 +735,7 @@ function Header({ date, setDate }: { date: string; setDate: (d: string) => void 
           <div>
             <div className="text-base font-semibold leading-tight">PharmaStock</div>
             <div className="text-xs text-muted-foreground leading-tight">
-              Karnataka EDL · Daily Entry
+              Karnataka EDL · Reports · Voice Entry
             </div>
           </div>
         </div>
