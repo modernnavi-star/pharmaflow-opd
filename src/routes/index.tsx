@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
-import { SpeechRecognition } from "@capacitor-community/speech-recognition";
 import { Toaster, toast } from "sonner";
 import {
   Search,
@@ -48,17 +47,15 @@ import { cn } from "@/lib/utils";
 export const Route = createFileRoute("/")({
   head: () => ({
     meta: [
-      { title: "PharmaStock — Daily Medicine Stock Entry" },
+      { title: "PHC AKKIRAMPURA PHARMACY DATA" },
       {
         name: "description",
-        content:
-          "Daily pharmacy stock entry for Karnataka Essential Drug List. Search, update opening/received/dispensed/closing stock, and track low-stock medicines.",
+        content: "PHC Akkirampura pharmacy stock, batch, expiry, reports and essential drug data.",
       },
-      { property: "og:title", content: "PharmaStock — Daily Medicine Stock Entry" },
+      { property: "og:title", content: "PHC AKKIRAMPURA PHARMACY DATA" },
       {
         property: "og:description",
-        content:
-          "Track daily stock for Karnataka EDL medicines with search, low-stock alerts and history.",
+        content: "PHC Akkirampura pharmacy data with reports, expiry alerts and voice stock entry.",
       },
     ],
   }),
@@ -120,6 +117,7 @@ type LocalReportEntry = {
   medicine_name: string;
   generic_name: string | null;
   strength: string | null;
+  form: string | null;
   category: string | null;
   entry_date: string;
   opening_stock: number;
@@ -167,7 +165,6 @@ const upsertLocalEntry = (entry: LocalReportEntry) => {
   if (existingIndex >= 0) entries[existingIndex] = entry;
   else entries.push(entry);
   window.localStorage.setItem(LOCAL_ENTRIES_KEY, JSON.stringify(entries));
-  window.dispatchEvent(new Event("pharmastock-entries-updated"));
 };
 
 const packToUnits = (packType: PackType, quantity: number, unitsPerPack: number) =>
@@ -193,6 +190,49 @@ const downloadTextFile = (filename: string, content: string, type: string) => {
   a.download = filename;
   a.click();
   URL.revokeObjectURL(url);
+};
+
+const saveAndShareFile = async (filename: string, data: string, mimeType: string) => {
+  try {
+    const { Filesystem, Directory, Encoding } = await import("@capacitor/filesystem");
+    const { Share } = await import("@capacitor/share");
+    const saved = await Filesystem.writeFile({
+      path: filename,
+      data,
+      directory: Directory.Documents,
+      encoding: Encoding.UTF8,
+    });
+    await Share.share({
+      title: filename,
+      text: `Generated ${filename}`,
+      url: saved.uri,
+      dialogTitle: "Share report",
+    });
+  } catch (error) {
+    console.info("Capacitor file share unavailable; using browser download", error);
+    downloadTextFile(filename, data, mimeType);
+  }
+};
+
+const saveAndShareBase64File = async (filename: string, base64Data: string) => {
+  try {
+    const { Filesystem, Directory } = await import("@capacitor/filesystem");
+    const { Share } = await import("@capacitor/share");
+    const saved = await Filesystem.writeFile({
+      path: filename,
+      data: base64Data,
+      directory: Directory.Documents,
+    });
+    await Share.share({
+      title: filename,
+      text: `Generated ${filename}`,
+      url: saved.uri,
+      dialogTitle: "Share report",
+    });
+  } catch (error) {
+    console.info("Capacitor PDF share unavailable", error);
+    toast.error("Could not save PDF on this device.");
+  }
 };
 
 const parseDateLike = (value: string) => {
@@ -300,11 +340,7 @@ export function StockApp() {
       ? "issue"
       : "add";
 
-    const commandWithoutExpiry = normalized.replace(/exp(?:iry|ire|ires)?\s*[:#-]?\s*[\d/-]+/g, "");
-    const quantityMatch =
-      commandWithoutExpiry.match(/(\d+)\s*(tablet|tablets|unit|units|sheet|sheets|box|boxes)\b/) ??
-      commandWithoutExpiry.match(/\b(\d+)\b/);
-    const quantity = Number(quantityMatch?.[1] ?? 0);
+    const quantity = Number(normalized.match(/\d+/)?.[0] ?? 0);
     if (!quantity) {
       toast.error("Please include quantity, e.g. 'issue paracetamol 10 tablets'.");
       return;
@@ -318,32 +354,43 @@ export function StockApp() {
     const unitsPerPack = packType === "tablets" ? 1 : 10;
     const units = packToUnits(packType, quantity, unitsPerPack);
 
-    const searchableCommand = commandWithoutExpiry
-      .replace(
-        /\b(add|inward|receive|received|issue|dispense|dispensed|give|given|out|tablet|tablets|unit|units|sheet|sheets|box|boxes|batch)\b/g,
-        " ",
-      )
-      .replace(/[0-9:#/-]/g, " ")
-      .replace(/\s+/g, " ")
-      .trim();
-    const commandTokens = searchableCommand.split(" ").filter((token) => token.length >= 3);
+    const commandWords = normalized
+      .replace(/\d+/g, " ")
+      .split(/[^a-z]+/)
+      .filter(
+        (word) =>
+          word.length >= 3 &&
+          ![
+            "add",
+            "issue",
+            "dispense",
+            "dispensed",
+            "tablet",
+            "tablets",
+            "sheet",
+            "sheets",
+            "box",
+            "boxes",
+            "batch",
+            "expiry",
+            "expire",
+            "medicine",
+            "drug",
+          ].includes(word),
+      );
 
     const matched = medicines
       .map((medicine) => {
-        const haystack = [
-          medicine.name,
-          medicine.generic_name,
-          medicine.strength,
-          medicine.category,
-        ]
-          .filter(Boolean)
-          .join(" ")
-          .toLowerCase();
-        const score = commandTokens.reduce(
-          (sum, token) => sum + (haystack.includes(token) ? token.length : 0),
+        const haystack =
+          `${medicine.name} ${medicine.generic_name ?? ""} ${medicine.strength ?? ""}`.toLowerCase();
+        const exactScore = normalized.includes(medicine.name.toLowerCase())
+          ? medicine.name.length + 50
+          : 0;
+        const wordScore = commandWords.reduce(
+          (sum, word) => sum + (haystack.includes(word) ? word.length : 0),
           0,
         );
-        return { medicine, score };
+        return { medicine, score: exactScore + wordScore };
       })
       .sort((a, b) => b.score - a.score)[0];
 
@@ -373,6 +420,7 @@ export function StockApp() {
       medicine_name: medicine.name,
       generic_name: medicine.generic_name,
       strength: medicine.strength,
+      form: medicine.form,
       category: medicine.category,
       entry_date: date,
       opening_stock: opening,
@@ -402,7 +450,6 @@ export function StockApp() {
       <Header date={date} setDate={setDate} />
 
       <main className="mx-auto w-full max-w-6xl px-4 pb-24 pt-6 sm:pt-8">
-        <StatsRow stats={stats} />
         <ReportsSection date={date} medicines={medicines} />
         <QuickCommandBox onApply={applyQuickCommand} />
 
@@ -510,46 +557,44 @@ function QuickCommandBox({ onApply }: { onApply: (command: string) => void }) {
 
   const startVoice = async () => {
     if (typeof window === "undefined") return;
-    setListening(true);
-
     try {
+      const { SpeechRecognition } = await import("@capacitor-community/speech-recognition");
       const available = await SpeechRecognition.available();
       if (available.available) {
-        const permission = await SpeechRecognition.checkPermissions();
-        if (permission.speechRecognition !== "granted") {
-          await SpeechRecognition.requestPermissions();
-        }
+        await SpeechRecognition.requestPermissions();
+        setListening(true);
         const result = await SpeechRecognition.start({
           language: "en-IN",
           maxResults: 1,
-          prompt: "Say medicine stock command",
+          prompt: "Say add or dispense medicine command",
           partialResults: false,
           popup: true,
         });
         const text = result.matches?.[0] ?? "";
+        setListening(false);
         if (text) {
           setCommand(text);
           runCommand(text);
+          return;
         }
-        setListening(false);
-        return;
       }
     } catch (error) {
-      console.info("Native speech recognition unavailable, trying web speech", error);
+      console.info("Native speech recognition unavailable; trying browser API", error);
+      setListening(false);
     }
 
     const speechWindow = window as SpeechWindow;
-    const WebSpeechRecognition =
+    const SpeechRecognition =
       speechWindow.SpeechRecognition || speechWindow.webkitSpeechRecognition;
-    if (!WebSpeechRecognition) {
-      setListening(false);
-      toast.error("Voice input is not supported on this device. Please use typing box.");
+    if (!SpeechRecognition) {
+      toast.error("Voice input is not supported on this device/browser.");
       return;
     }
-    const recognition = new WebSpeechRecognition();
+    const recognition = new SpeechRecognition();
     recognition.lang = "en-IN";
     recognition.interimResults = false;
     recognition.maxAlternatives = 1;
+    setListening(true);
     recognition.onresult = (event) => {
       const text = event.results?.[0]?.[0]?.transcript ?? "";
       setCommand(text);
@@ -600,10 +645,7 @@ function ReportsSection({ date, medicines }: { date: string; medicines: Medicine
   const [entries, setEntries] = useState<LocalReportEntry[]>([]);
 
   useEffect(() => {
-    const refreshEntries = () => setEntries(getLocalEntries());
-    refreshEntries();
-    window.addEventListener("pharmastock-entries-updated", refreshEntries);
-    return () => window.removeEventListener("pharmastock-entries-updated", refreshEntries);
+    setEntries(getLocalEntries());
   }, [date, medicines]);
 
   const filteredEntries = useMemo(() => {
@@ -636,6 +678,7 @@ function ReportsSection({ date, medicines }: { date: string; medicines: Medicine
     entry.medicine_name,
     entry.generic_name ?? "",
     entry.strength ?? "",
+    entry.form ?? "",
     entry.category ?? "",
     entry.opening_stock,
     entry.received,
@@ -646,12 +689,13 @@ function ReportsSection({ date, medicines }: { date: string; medicines: Medicine
     entry.notes ?? "",
   ]);
 
-  const exportExcel = () => {
+  const exportExcel = async () => {
     const headers = [
       "Date",
       "Drug",
       "Generic",
       "Strength",
+      "Form",
       "Category",
       "Opening",
       "Inward",
@@ -662,21 +706,57 @@ function ReportsSection({ date, medicines }: { date: string; medicines: Medicine
       "Notes",
     ];
     const csv = [headers, ...exportRows].map((row) => row.map(escapeCsv).join(",")).join("\n");
-    downloadTextFile(`pharmastock-${mode}-${date}.csv`, csv, "text/csv;charset=utf-8");
+    await saveAndShareFile(`phc-akkirampura-${mode}-${date}.csv`, csv, "text/csv;charset=utf-8");
   };
 
-  const exportPdf = () => {
-    const htmlRows = exportRows
-      .map(
-        (row) =>
-          `<tr>${row.map((cell) => `<td>${String(cell).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]!)}</td>`).join("")}</tr>`,
-      )
-      .join("");
-    const html = `<!doctype html><html><head><title>${title}</title><style>body{font-family:Arial,sans-serif;padding:20px}h1{font-size:20px}table{width:100%;border-collapse:collapse;font-size:11px}td,th{border:1px solid #999;padding:5px;text-align:left}.stats{display:flex;gap:12px;margin:12px 0}.stat{border:1px solid #999;padding:8px}</style></head><body><h1>${title}</h1><div class="stats"><div class="stat">Inward: ${report.received}</div><div class="stat">Issued: ${report.issued}</div><div class="stat">Drug items: ${report.uniqueMedicines}</div><div class="stat">Near expiry: ${report.expiringSoon}</div></div><table><thead><tr>${["Date", "Drug", "Generic", "Strength", "Category", "Opening", "Inward", "Issued", "Closing", "Batch", "Expiry", "Notes"].map((h) => `<th>${h}</th>`).join("")}</tr></thead><tbody>${htmlRows}</tbody></table><script>window.print()</script></body></html>`;
-    const win = window.open("", "_blank");
-    if (!win) return toast.error("Popup blocked. Allow popups to generate PDF.");
-    win.document.write(html);
-    win.document.close();
+  const exportPdf = async () => {
+    try {
+      const { jsPDF } = await import("jspdf");
+      const doc = new jsPDF({ orientation: "landscape" });
+      doc.setFontSize(14);
+      doc.text("PHC AKKIRAMPURA PHARMACY DATA", 14, 14);
+      doc.setFontSize(10);
+      doc.text(title, 14, 22);
+      doc.text(
+        `Inward: ${report.received}    Issued: ${report.issued}    Drug items: ${report.uniqueMedicines}    Near expiry: ${report.expiringSoon}`,
+        14,
+        30,
+      );
+
+      const headers = [
+        "Date",
+        "Drug",
+        "Strength",
+        "Opening",
+        "In",
+        "Issue",
+        "Closing",
+        "Batch",
+        "Expiry",
+      ];
+      let y = 42;
+      doc.setFontSize(8);
+      doc.text(headers.join("  |  "), 14, y);
+      y += 6;
+      exportRows.slice(0, 40).forEach((row) => {
+        if (y > 190) {
+          doc.addPage();
+          y = 16;
+        }
+        const line = [row[0], row[1], row[3], row[6], row[7], row[8], row[9], row[10], row[11]]
+          .map((cell) => String(cell ?? "").slice(0, 28))
+          .join(" | ");
+        doc.text(line, 14, y);
+        y += 5;
+      });
+
+      const dataUri = doc.output("datauristring");
+      const base64 = dataUri.split(",")[1];
+      await saveAndShareBase64File(`phc-akkirampura-${mode}-${date}.pdf`, base64);
+    } catch (error) {
+      console.info("PDF generation failed", error);
+      toast.error("PDF generation failed on this device.");
+    }
   };
 
   return (
@@ -728,8 +808,7 @@ function ReportsSection({ date, medicines }: { date: string; medicines: Medicine
             {nearExpiryEntries.slice(0, 6).map((entry) => (
               <div key={`${entry.id}-expiry`} className="flex justify-between gap-2">
                 <span className="truncate">
-                  {entry.medicine_name} {entry.strength ? `· ${entry.strength}` : ""}{" "}
-                  {entry.batch_no ? `· Batch ${entry.batch_no}` : ""}
+                  {entry.medicine_name} {entry.batch_no ? `· Batch ${entry.batch_no}` : ""}
                 </span>
                 <span className="shrink-0 font-medium">Exp {entry.expiry_date}</span>
               </div>
@@ -794,9 +873,9 @@ function Header({ date, setDate }: { date: string; setDate: (d: string) => void 
             <Pill className="size-5" />
           </div>
           <div>
-            <div className="text-base font-semibold leading-tight">PharmaStock</div>
+            <div className="text-base font-semibold leading-tight">PHC AKKIRAMPURA</div>
             <div className="text-xs text-muted-foreground leading-tight">
-              Karnataka EDL · Reports · Voice Entry
+              PHARMACY DATA · Reports · Voice
             </div>
           </div>
         </div>
@@ -1025,6 +1104,7 @@ function EntryDialog({
       medicine_name: medicine.name,
       generic_name: medicine.generic_name,
       strength: medicine.strength,
+      form: medicine.form,
       category: medicine.category,
       entry_date: date,
       opening_stock: opening,
