@@ -14,7 +14,92 @@ export type Database = {
   }
   public: {
     Tables: {
-      [_ in never]: never
+      medicines: {
+        Row: {
+          category: string | null
+          created_at: string
+          current_stock: number
+          form: string | null
+          generic_name: string | null
+          id: string
+          name: string
+          reorder_level: number
+          strength: string | null
+          unit: string
+          updated_at: string
+        }
+        Insert: {
+          category?: string | null
+          created_at?: string
+          current_stock?: number
+          form?: string | null
+          generic_name?: string | null
+          id?: string
+          name: string
+          reorder_level?: number
+          strength?: string | null
+          unit?: string
+          updated_at?: string
+        }
+        Update: {
+          category?: string | null
+          created_at?: string
+          current_stock?: number
+          form?: string | null
+          generic_name?: string | null
+          id?: string
+          name?: string
+          reorder_level?: number
+          strength?: string | null
+          unit?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      stock_entries: {
+        Row: {
+          closing_stock: number
+          created_at: string
+          dispensed: number
+          entry_date: string
+          id: string
+          medicine_id: string
+          notes: string | null
+          opening_stock: number
+          received: number
+        }
+        Insert: {
+          closing_stock?: number
+          created_at?: string
+          dispensed?: number
+          entry_date?: string
+          id?: string
+          medicine_id: string
+          notes?: string | null
+          opening_stock?: number
+          received?: number
+        }
+        Update: {
+          closing_stock?: number
+          created_at?: string
+          dispensed?: number
+          entry_date?: string
+          id?: string
+          medicine_id?: string
+          notes?: string | null
+          opening_stock?: number
+          received?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "stock_entries_medicine_id_fkey"
+            columns: ["medicine_id"]
+            isOneToOne: false
+            referencedRelation: "medicines"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
     }
     Views: {
       [_ in never]: never
