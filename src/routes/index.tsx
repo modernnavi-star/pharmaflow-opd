@@ -215,9 +215,7 @@ function StockApp() {
               No medicines match your filters.
             </div>
           ) : (
-            filtered.map((m) => (
-              <MedicineRow key={m.id} m={m} onSelect={() => setSelected(m)} />
-            ))
+            filtered.map((m) => <MedicineRow key={m.id} m={m} onSelect={() => setSelected(m)} />)
           )}
         </div>
       </main>
@@ -314,9 +312,7 @@ function MedicineRow({ m, onSelect }: { m: Medicine; onSelect: () => void }) {
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-baseline gap-x-2">
           <span className="truncate font-medium">{m.name}</span>
-          {m.strength && (
-            <span className="text-xs text-muted-foreground">{m.strength}</span>
-          )}
+          {m.strength && <span className="text-xs text-muted-foreground">{m.strength}</span>}
         </div>
         <div className="mt-0.5 truncate text-xs text-muted-foreground">
           {m.generic_name ?? "—"} · {m.form ?? "—"} · {m.category ?? "—"}
@@ -325,9 +321,7 @@ function MedicineRow({ m, onSelect }: { m: Medicine; onSelect: () => void }) {
       <div className="flex flex-col items-end gap-1">
         <div className="text-lg font-semibold tabular-nums leading-none">
           {m.current_stock}
-          <span className="ml-1 text-xs font-normal text-muted-foreground">
-            {m.unit}
-          </span>
+          <span className="ml-1 text-xs font-normal text-muted-foreground">{m.unit}</span>
         </div>
         {isOut ? (
           <Badge variant="destructive" className="gap-1">
@@ -443,9 +437,7 @@ function EntryDialog({
             <Pill className="size-4 text-primary" />
             {medicine.name}
             {medicine.strength && (
-              <span className="text-sm font-normal text-muted-foreground">
-                {medicine.strength}
-              </span>
+              <span className="text-sm font-normal text-muted-foreground">{medicine.strength}</span>
             )}
           </DialogTitle>
           <DialogDescription>
@@ -497,9 +489,7 @@ function EntryDialog({
                 </span>
               </div>
               {closing === 0 ? (
-                <p className="mt-1 text-xs text-destructive">
-                  Will be marked Out of stock.
-                </p>
+                <p className="mt-1 text-xs text-destructive">Will be marked Out of stock.</p>
               ) : closing <= medicine.reorder_level ? (
                 <p className="mt-1 text-xs text-warning-foreground">
                   Below reorder level ({medicine.reorder_level}). Consider reordering.
