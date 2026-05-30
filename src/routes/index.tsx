@@ -19,6 +19,7 @@ import {
   FileText,
   FileSpreadsheet,
 } from "lucide-react";
+import { initialStockMedicines } from "@/data/initial-stock";
 import { embeddedMedicines } from "@/data/medicines";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
@@ -92,6 +93,7 @@ const LOCAL_ENTRIES_KEY = "pharmastock-local-entries";
 const LOCAL_CUSTOM_MEDICINES_KEY = "pharmastock-custom-medicines";
 const LOCAL_DELETED_MEDICINES_KEY = "pharmastock-deleted-medicines";
 const LOCAL_GOOGLE_SHEETS_URL_KEY = "pharmastock-google-sheets-url";
+const LOCAL_INITIAL_STOCK_IMPORTED_KEY = "pharmastock-initial-pdf-stock-imported";
 const DEFAULT_GOOGLE_SHEETS_URL =
   "https://script.google.com/macros/s/AKfycbybJCQ9jLVQcxU7bxzByBO9lLdgPoDWDgaQefGwpfPcM1E2_E9qpKFmLbwPBcIzcA1Dig/exec";
 
@@ -215,9 +217,11 @@ const setLocalEntries = (entries: LocalReportEntry[]) => {
 const applyEntriesToLocalStocks = (entries: LocalReportEntry[]) => {
   if (typeof window === "undefined") return;
   const latestByMedicine = new Map<string, LocalReportEntry>();
+  const entrySortKey = (entry: LocalReportEntry) =>
+    `${entry.entry_date}-${entry.notes?.startsWith("Initial stock imported") ? "000" : "999"}-${entry.id}`;
   entries
     .slice()
-    .sort((a, b) => `${a.entry_date}-${a.id}`.localeCompare(`${b.entry_date}-${b.id}`))
+    .sort((a, b) => entrySortKey(a).localeCompare(entrySortKey(b)))
     .forEach((entry) => latestByMedicine.set(entry.medicine_id, entry));
   const localStocks = getLocalStocks();
   latestByMedicine.forEach((entry) => {
@@ -251,29 +255,33 @@ const pullEntriesFromGoogleSheet = async () => {
   }
 };
 
-const syncEntryToGoogleSheet = async (entry: LocalReportEntry) => {
+const syncEntriesToGoogleSheet = async (entries: LocalReportEntry[]) => {
   const url = getGoogleSheetsUrl();
-  if (!url) return;
+  if (!url || entries.length === 0) return;
   try {
     await fetch(url, {
       method: "POST",
       mode: "no-cors",
       headers: { "Content-Type": "text/plain;charset=utf-8" },
-      body: JSON.stringify({ type: "upsert_stock_entry", entry }),
+      body: JSON.stringify({ type: "batch_upsert_stock_entries", entries }),
     });
   } catch (error) {
-    console.info("Google Sheets sync failed; local data is still saved", error);
+    console.info("Google Sheets batch sync failed; local data is still saved", error);
   }
 };
 
-const upsertLocalEntry = (entry: LocalReportEntry) => {
+const syncEntryToGoogleSheet = async (entry: LocalReportEntry) => {
+  await syncEntriesToGoogleSheet([entry]);
+};
+
+const upsertLocalEntry = (entry: LocalReportEntry, sync = true) => {
   if (typeof window === "undefined") return;
   const entries = getLocalEntries();
   const existingIndex = entries.findIndex((e) => e.id === entry.id);
   if (existingIndex >= 0) entries[existingIndex] = entry;
   else entries.push(entry);
   window.localStorage.setItem(LOCAL_ENTRIES_KEY, JSON.stringify(entries));
-  void syncEntryToGoogleSheet(entry);
+  if (sync) void syncEntryToGoogleSheet(entry);
 };
 
 const packToUnits = (packType: PackType, quantity: number, unitsPerPack: number) =>
@@ -443,6 +451,62 @@ const deleteLocalMedicine = (medicineId: string) => {
   setDeletedMedicineIds([...getDeletedMedicineIds(), medicineId]);
 };
 
+const importInitialPdfStockIfNeeded = () => {
+  if (typeof window === "undefined") return 0;
+  if (window.localStorage.getItem(LOCAL_INITIAL_STOCK_IMPORTED_KEY) === "true") return 0;
+
+  const customMedicines = getCustomMedicines();
+  const customById = new Map(customMedicines.map((medicine) => [medicine.id, medicine]));
+  const importDate = today();
+  const importedEntries: LocalReportEntry[] = [];
+
+  initialStockMedicines.forEach((item) => {
+    if (!customById.has(item.id)) {
+      customById.set(item.id, {
+        id: item.id,
+        name: item.name,
+        generic_name: item.generic_name,
+        strength: item.strength,
+        form: item.form,
+        category: item.category,
+        unit: item.unit,
+        reorder_level: item.reorder_level,
+        current_stock: item.stock_on_hand,
+        updated_at: "pdf-stock-import",
+      });
+    }
+    setLocalStock(item.id, item.stock_on_hand);
+    const entry: LocalReportEntry = {
+      id: `pdf-stock-${item.drug_code}-${item.id}`,
+      medicine_id: item.id,
+      medicine_name: item.name,
+      generic_name: item.generic_name,
+      strength: item.strength,
+      form: item.form,
+      category: item.category,
+      entry_date: importDate,
+      opening_stock: 0,
+      received: item.stock_on_hand,
+      dispensed: 0,
+      closing_stock: item.stock_on_hand,
+      batch_no: null,
+      expiry_date: null,
+      received_pack_type: "tablets",
+      received_pack_qty: item.stock_on_hand,
+      issue_pack_type: "tablets",
+      issue_pack_qty: 0,
+      notes: `Initial stock imported from Consolidated_PHU_Akkirampura_Stock.pdf; Drug Code: ${item.drug_code}`,
+    };
+    importedEntries.push(entry);
+    upsertLocalEntry(entry, false);
+  });
+
+  void syncEntriesToGoogleSheet(importedEntries);
+  setCustomMedicines(Array.from(customById.values()));
+  window.localStorage.setItem(LOCAL_INITIAL_STOCK_IMPORTED_KEY, "true");
+  return initialStockMedicines.length;
+};
+
 const getEmbeddedMedicines = (): Medicine[] => {
   const localStocks = getLocalStocks();
   const deletedIds = new Set(getDeletedMedicineIds());
@@ -468,19 +532,13 @@ export function StockApp() {
     // Always show the embedded catalog first so the Android app works even
     // when Supabase env vars or network are unavailable.
     await pullEntriesFromGoogleSheet();
+    const imported = importInitialPdfStockIfNeeded();
+    if (imported) toast.success(`Imported ${imported} PDF stock items`);
     setMedicines(getEmbeddedMedicines());
     setLoading(false);
 
-    try {
-      const { data, error } = await supabase
-        .from("medicines")
-        .select("*")
-        .order("name", { ascending: true })
-        .limit(2000);
-      if (!error && data?.length) setMedicines(data as Medicine[]);
-    } catch (error) {
-      console.info("Using embedded offline medicine catalog", error);
-    }
+    // Google Sheets + local storage are the source of truth for current stock.
+    // Do not overwrite local calculated stock with older Supabase catalog rows.
   };
 
   useEffect(() => {

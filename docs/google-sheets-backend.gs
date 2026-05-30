@@ -84,14 +84,16 @@ function doPost(e) {
   try {
     setupPharmacySheetIfMissing_();
     const body = JSON.parse(e.postData && e.postData.contents ? e.postData.contents : '{}');
-    const entry = body.entry || body;
+    const entries = body.entries || (body.entry ? [body.entry] : [body]);
+    const ids = [];
 
-    if (!entry.id) {
-      entry.id = Utilities.getUuid();
-    }
+    entries.forEach(function(entry) {
+      if (!entry.id) entry.id = Utilities.getUuid();
+      upsertEntry_(entry);
+      ids.push(entry.id);
+    });
 
-    upsertEntry_(entry);
-    return json_({ ok: true, id: entry.id });
+    return json_({ ok: true, count: ids.length, ids: ids });
   } catch (error) {
     return json_({ ok: false, error: String(error) });
   }
