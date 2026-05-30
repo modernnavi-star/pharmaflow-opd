@@ -91,6 +91,7 @@ const LOCAL_STOCK_KEY = "pharmastock-local-stocks";
 const LOCAL_ENTRIES_KEY = "pharmastock-local-entries";
 const LOCAL_CUSTOM_MEDICINES_KEY = "pharmastock-custom-medicines";
 const LOCAL_DELETED_MEDICINES_KEY = "pharmastock-deleted-medicines";
+const LOCAL_GOOGLE_SHEETS_URL_KEY = "pharmastock-google-sheets-url";
 
 type PackType = "tablets" | "sheets" | "boxes";
 
@@ -160,6 +161,31 @@ const getLocalEntries = (): LocalReportEntry[] => {
   }
 };
 
+const getGoogleSheetsUrl = () => {
+  if (typeof window === "undefined") return "";
+  return window.localStorage.getItem(LOCAL_GOOGLE_SHEETS_URL_KEY) ?? "";
+};
+
+const setGoogleSheetsUrl = (url: string) => {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(LOCAL_GOOGLE_SHEETS_URL_KEY, url.trim());
+};
+
+const syncEntryToGoogleSheet = async (entry: LocalReportEntry) => {
+  const url = getGoogleSheetsUrl();
+  if (!url) return;
+  try {
+    await fetch(url, {
+      method: "POST",
+      mode: "no-cors",
+      headers: { "Content-Type": "text/plain;charset=utf-8" },
+      body: JSON.stringify({ type: "stock_entry", entry }),
+    });
+  } catch (error) {
+    console.info("Google Sheets sync failed; local data is still saved", error);
+  }
+};
+
 const upsertLocalEntry = (entry: LocalReportEntry) => {
   if (typeof window === "undefined") return;
   const entries = getLocalEntries();
@@ -167,6 +193,7 @@ const upsertLocalEntry = (entry: LocalReportEntry) => {
   if (existingIndex >= 0) entries[existingIndex] = entry;
   else entries.push(entry);
   window.localStorage.setItem(LOCAL_ENTRIES_KEY, JSON.stringify(entries));
+  void syncEntryToGoogleSheet(entry);
 };
 
 const packToUnits = (packType: PackType, quantity: number, unitsPerPack: number) =>
@@ -678,6 +705,14 @@ function SettingsSection({
   const [unit, setUnit] = useState("tablets/units");
   const [reorderLevel, setReorderLevel] = useState(50);
   const [deleteMedicineId, setDeleteMedicineId] = useState("");
+  const [sheetUrl, setSheetUrl] = useState(getGoogleSheetsUrl);
+
+  const saveSheetUrl = () => {
+    setGoogleSheetsUrl(sheetUrl);
+    toast.success(
+      sheetUrl.trim() ? "Google Sheets backend URL saved" : "Google Sheets sync disabled",
+    );
+  };
 
   const addMedicine = () => {
     if (!name.trim()) {
@@ -732,6 +767,25 @@ function SettingsSection({
 
       {open && (
         <div className="mt-3 space-y-4">
+          <div className="rounded-lg border border-border bg-muted/20 p-3">
+            <div className="text-sm font-medium">Google Sheets backend sync</div>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Paste your Google Apps Script Web App URL. New stock entries will save locally and
+              also sync to Google Sheets.
+            </p>
+            <div className="mt-3 flex flex-col gap-2 sm:flex-row">
+              <Input
+                value={sheetUrl}
+                onChange={(e) => setSheetUrl(e.target.value)}
+                placeholder="https://script.google.com/macros/s/.../exec"
+                className="h-10 flex-1"
+              />
+              <Button type="button" onClick={saveSheetUrl}>
+                Save URL
+              </Button>
+            </div>
+          </div>
+
           <div className="rounded-lg border border-border bg-muted/20 p-3">
             <div className="text-sm font-medium">Add new medicine</div>
             <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
@@ -1001,43 +1055,161 @@ function ReportsSection({ date, medicines }: { date: string; medicines: Medicine
   const exportPdf = async () => {
     try {
       const { jsPDF } = await import("jspdf");
-      const doc = new jsPDF({ orientation: "landscape" });
-      doc.setFontSize(14);
-      doc.text("PHC AKKIRAMPURA PHARMACY DATA", 14, 14);
-      doc.setFontSize(10);
-      doc.text(title, 14, 22);
-      doc.text(
-        `Inward: ${report.received}    Issued: ${report.issued}    Drug items: ${report.uniqueMedicines}    Near expiry: ${report.expiringSoon}`,
-        14,
-        30,
-      );
-
-      const headers = [
-        "Date",
-        "Drug",
-        "Strength",
-        "Opening",
-        "In",
-        "Issue",
-        "Closing",
-        "Batch",
-        "Expiry",
+      const doc = new jsPDF({ orientation: "landscape", unit: "mm", format: "a4" });
+      const pageWidth = doc.internal.pageSize.getWidth();
+      const pageHeight = doc.internal.pageSize.getHeight();
+      const margin = 10;
+      const tableWidth = pageWidth - margin * 2;
+      const columns = [
+        { title: "Date", width: 22 },
+        { title: "Medicine / Strength", width: 62 },
+        { title: "Opening", width: 19 },
+        { title: "Inward", width: 18 },
+        { title: "Issued", width: 18 },
+        { title: "Closing", width: 19 },
+        { title: "Batch", width: 28 },
+        { title: "Expiry", width: 24 },
+        { title: "Notes", width: tableWidth - 210 },
       ];
-      let y = 42;
-      doc.setFontSize(8);
-      doc.text(headers.join("  |  "), 14, y);
-      y += 6;
-      exportRows.slice(0, 40).forEach((row) => {
-        if (y > 190) {
+
+      const drawTitle = () => {
+        doc.setFillColor(5, 150, 105);
+        doc.rect(0, 0, pageWidth, 18, "F");
+        doc.setTextColor(255, 255, 255);
+        doc.setFont("helvetica", "bold");
+        doc.setFontSize(15);
+        doc.text("PHC AKKIRAMPURA PHARMACY DATA", margin, 8);
+        doc.setFontSize(10);
+        doc.text(title, margin, 14);
+        doc.setTextColor(15, 23, 42);
+      };
+
+      const drawSummary = (y: number) => {
+        const stats = [
+          ["INWARD", report.received],
+          ["ISSUED", report.issued],
+          ["DRUG ITEMS", report.uniqueMedicines],
+          ["NEAR EXPIRY", report.expiringSoon],
+        ] as const;
+        const boxWidth = (tableWidth - 9) / 4;
+        stats.forEach(([label, value], index) => {
+          const x = margin + index * (boxWidth + 3);
+          doc.setDrawColor(203, 213, 225);
+          doc.setFillColor(248, 250, 252);
+          doc.roundedRect(x, y, boxWidth, 16, 2, 2, "FD");
+          doc.setFont("helvetica", "bold");
+          doc.setFontSize(7);
+          doc.setTextColor(71, 85, 105);
+          doc.text(label, x + 3, y + 6);
+          doc.setFontSize(12);
+          doc.setTextColor(15, 23, 42);
+          doc.text(String(value), x + 3, y + 13);
+        });
+      };
+
+      const drawTableHeader = (y: number) => {
+        let x = margin;
+        doc.setFillColor(226, 232, 240);
+        doc.setDrawColor(148, 163, 184);
+        doc.rect(margin, y, tableWidth, 9, "FD");
+        doc.setFont("helvetica", "bold");
+        doc.setFontSize(7.5);
+        doc.setTextColor(15, 23, 42);
+        columns.forEach((column) => {
+          doc.text(column.title, x + 1.5, y + 5.8);
+          x += column.width;
+        });
+      };
+
+      drawTitle();
+      drawSummary(23);
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(10);
+      doc.setTextColor(15, 23, 42);
+      doc.text("Detailed Stock Report", margin, 47);
+      drawTableHeader(51);
+
+      let y = 60;
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(7);
+      const rows = filteredEntries.length ? filteredEntries : [];
+
+      rows.forEach((entry, index) => {
+        const medicineText = `${entry.medicine_name}${entry.strength ? ` · ${entry.strength}` : ""}${entry.form ? ` · ${entry.form}` : ""}`;
+        const rowValues = [
+          entry.entry_date,
+          medicineText,
+          entry.opening_stock,
+          entry.received,
+          entry.dispensed,
+          entry.closing_stock,
+          entry.batch_no ?? "-",
+          entry.expiry_date ?? "-",
+          entry.notes ?? "",
+        ];
+        const splitValues = rowValues.map((value, colIndex) =>
+          doc.splitTextToSize(String(value), Math.max(8, columns[colIndex].width - 3)),
+        );
+        const rowHeight = Math.max(
+          8,
+          Math.max(...splitValues.map((value) => value.length)) * 4 + 2,
+        );
+
+        if (y + rowHeight > pageHeight - 12) {
           doc.addPage();
-          y = 16;
+          drawTitle();
+          drawTableHeader(24);
+          y = 33;
         }
-        const line = [row[0], row[1], row[3], row[6], row[7], row[8], row[9], row[10], row[11]]
-          .map((cell) => String(cell ?? "").slice(0, 28))
-          .join(" | ");
-        doc.text(line, 14, y);
-        y += 5;
+
+        let x = margin;
+        doc.setFillColor(
+          index % 2 === 0 ? 255 : 248,
+          index % 2 === 0 ? 255 : 250,
+          index % 2 === 0 ? 255 : 252,
+        );
+        doc.setDrawColor(226, 232, 240);
+        doc.rect(margin, y, tableWidth, rowHeight, "FD");
+        splitValues.forEach((lines, colIndex) => {
+          doc.setFont("helvetica", colIndex === 1 ? "bold" : "normal");
+          doc.setTextColor(
+            colIndex === 4 ? 185 : 15,
+            colIndex === 4 ? 28 : 23,
+            colIndex === 4 ? 28 : 42,
+          );
+          doc.text(lines.slice(0, 3), x + 1.5, y + 4.5);
+          x += columns[colIndex].width;
+        });
+        y += rowHeight;
       });
+
+      if (nearExpiryEntries.length) {
+        if (y > pageHeight - 45) {
+          doc.addPage();
+          drawTitle();
+          y = 26;
+        }
+        doc.setFont("helvetica", "bold");
+        doc.setTextColor(185, 28, 28);
+        doc.setFontSize(10);
+        doc.text("Near Expiry Warning - within 3 months", margin, y + 8);
+        doc.setFont("helvetica", "normal");
+        doc.setFontSize(8);
+        y += 15;
+        nearExpiryEntries.slice(0, 15).forEach((entry) => {
+          doc.text(
+            `• ${entry.medicine_name}${entry.strength ? ` (${entry.strength})` : ""}  Batch: ${entry.batch_no ?? "-"}  Exp: ${entry.expiry_date}`,
+            margin,
+            y,
+          );
+          y += 5;
+        });
+      }
+
+      doc.setFont("helvetica", "bold");
+      doc.setTextColor(71, 85, 105);
+      doc.setFontSize(7);
+      doc.text(`Generated: ${new Date().toLocaleString()}`, margin, pageHeight - 6);
 
       const dataUri = doc.output("datauristring");
       const base64 = dataUri.split(",")[1];
