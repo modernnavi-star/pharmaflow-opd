@@ -19,7 +19,6 @@ import {
   FileText,
   FileSpreadsheet,
 } from "lucide-react";
-import { initialStockMedicines } from "@/data/initial-stock";
 import { embeddedMedicines } from "@/data/medicines";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
@@ -93,7 +92,6 @@ const LOCAL_ENTRIES_KEY = "pharmastock-local-entries";
 const LOCAL_CUSTOM_MEDICINES_KEY = "pharmastock-custom-medicines";
 const LOCAL_DELETED_MEDICINES_KEY = "pharmastock-deleted-medicines";
 const LOCAL_GOOGLE_SHEETS_URL_KEY = "pharmastock-google-sheets-url";
-const LOCAL_INITIAL_STOCK_IMPORTED_KEY = "pharmastock-initial-pdf-stock-imported";
 const DEFAULT_GOOGLE_SHEETS_URL =
   "https://script.google.com/macros/s/AKfycbybJCQ9jLVQcxU7bxzByBO9lLdgPoDWDgaQefGwpfPcM1E2_E9qpKFmLbwPBcIzcA1Dig/exec";
 
@@ -235,6 +233,30 @@ const mergeRemoteEntries = (remoteEntries: LocalReportEntry[]) => {
   const map = new Map<string, LocalReportEntry>();
   getLocalEntries().forEach((entry) => map.set(entry.id, entry));
   remoteEntries.forEach((entry) => entry.id && map.set(entry.id, entry));
+
+  const knownMedicineIds = new Set([
+    ...embeddedMedicines.map((medicine) => medicine.id),
+    ...getCustomMedicines().map((medicine) => medicine.id),
+  ]);
+  const customMedicines = getCustomMedicines();
+  remoteEntries.forEach((entry) => {
+    if (!entry.medicine_id || knownMedicineIds.has(entry.medicine_id)) return;
+    knownMedicineIds.add(entry.medicine_id);
+    customMedicines.push({
+      id: entry.medicine_id,
+      name: entry.medicine_name || "Sheet medicine",
+      generic_name: entry.generic_name,
+      strength: entry.strength,
+      form: entry.form,
+      category: entry.category || "Google Sheet Stock",
+      unit: entry.form?.toLowerCase().includes("injection") ? "vials/ampoules" : "units",
+      reorder_level: 10,
+      current_stock: Number(entry.closing_stock || 0),
+      updated_at: "google-sheet-sync",
+    });
+  });
+  setCustomMedicines(customMedicines);
+
   const merged = Array.from(map.values()).sort((a, b) => a.entry_date.localeCompare(b.entry_date));
   setLocalEntries(merged);
   applyEntriesToLocalStocks(merged);
@@ -447,64 +469,7 @@ const addCustomMedicine = (medicine: Omit<Medicine, "id" | "updated_at" | "curre
 };
 
 const deleteLocalMedicine = (medicineId: string) => {
-  setCustomMedicines(getCustomMedicines().filter((medicine) => medicine.id !== medicineId));
-  setDeletedMedicineIds([...getDeletedMedicineIds(), medicineId]);
-};
-
-const importInitialPdfStockIfNeeded = () => {
-  if (typeof window === "undefined") return 0;
-  if (window.localStorage.getItem(LOCAL_INITIAL_STOCK_IMPORTED_KEY) === "true") return 0;
-
-  const customMedicines = getCustomMedicines();
-  const customById = new Map(customMedicines.map((medicine) => [medicine.id, medicine]));
-  const importDate = today();
-  const importedEntries: LocalReportEntry[] = [];
-
-  initialStockMedicines.forEach((item) => {
-    if (!customById.has(item.id)) {
-      customById.set(item.id, {
-        id: item.id,
-        name: item.name,
-        generic_name: item.generic_name,
-        strength: item.strength,
-        form: item.form,
-        category: item.category,
-        unit: item.unit,
-        reorder_level: item.reorder_level,
-        current_stock: item.stock_on_hand,
-        updated_at: "pdf-stock-import",
-      });
-    }
-    setLocalStock(item.id, item.stock_on_hand);
-    const entry: LocalReportEntry = {
-      id: `pdf-stock-${item.drug_code}-${item.id}`,
-      medicine_id: item.id,
-      medicine_name: item.name,
-      generic_name: item.generic_name,
-      strength: item.strength,
-      form: item.form,
-      category: item.category,
-      entry_date: importDate,
-      opening_stock: 0,
-      received: item.stock_on_hand,
-      dispensed: 0,
-      closing_stock: item.stock_on_hand,
-      batch_no: null,
-      expiry_date: null,
-      received_pack_type: "tablets",
-      received_pack_qty: item.stock_on_hand,
-      issue_pack_type: "tablets",
-      issue_pack_qty: 0,
-      notes: `Initial stock imported from Consolidated_PHU_Akkirampura_Stock.pdf; Drug Code: ${item.drug_code}`,
-    };
-    importedEntries.push(entry);
-    upsertLocalEntry(entry, false);
-  });
-
-  void syncEntriesToGoogleSheet(importedEntries);
-  setCustomMedicines(Array.from(customById.values()));
-  window.localStorage.setItem(LOCAL_INITIAL_STOCK_IMPORTED_KEY, "true");
-  return initialStockMedicines.length;
+  deleteLocalMedicines([medicineId]);
 };
 
 const getEmbeddedMedicines = (): Medicine[] => {
@@ -532,8 +497,6 @@ export function StockApp() {
     // Always show the embedded catalog first so the Android app works even
     // when Supabase env vars or network are unavailable.
     await pullEntriesFromGoogleSheet();
-    const imported = importInitialPdfStockIfNeeded();
-    if (imported) toast.success(`Imported ${imported} PDF stock items`);
     setMedicines(getEmbeddedMedicines());
     setLoading(false);
 
@@ -867,6 +830,16 @@ function SettingsSection({
   const [unit, setUnit] = useState("tablets/units");
   const [reorderLevel, setReorderLevel] = useState(50);
   const [deleteMedicineId, setDeleteMedicineId] = useState("");
+  const [editMedicineId, setEditMedicineId] = useState("");
+  const [editName, setEditName] = useState("");
+  const [editGenericName, setEditGenericName] = useState("");
+  const [editStrength, setEditStrength] = useState("");
+  const [editForm, setEditForm] = useState("");
+  const [editCategory, setEditCategory] = useState("");
+  const [editUnit, setEditUnit] = useState("");
+  const [editReorderLevel, setEditReorderLevel] = useState(0);
+  const [bulkDeleteFilter, setBulkDeleteFilter] = useState("");
+  const [bulkDeleteIds, setBulkDeleteIds] = useState<string[]>([]);
   const [sheetUrl, setSheetUrl] = useState(getGoogleSheetsUrl);
 
   const saveSheetUrl = () => {
@@ -884,6 +857,72 @@ function SettingsSection({
         ? `Synced ${count} entries from Google Sheets`
         : "Sync checked. No new sheet data found.",
     );
+  };
+
+  const selectedEditMedicine = medicines.find((medicine) => medicine.id === editMedicineId);
+
+  useEffect(() => {
+    if (!selectedEditMedicine) return;
+    setEditName(selectedEditMedicine.name);
+    setEditGenericName(selectedEditMedicine.generic_name ?? "");
+    setEditStrength(selectedEditMedicine.strength ?? "");
+    setEditForm(selectedEditMedicine.form ?? "");
+    setEditCategory(selectedEditMedicine.category ?? "");
+    setEditUnit(selectedEditMedicine.unit);
+    setEditReorderLevel(selectedEditMedicine.reorder_level);
+  }, [selectedEditMedicine]);
+
+  const updateMedicine = () => {
+    if (!selectedEditMedicine) {
+      toast.error("Select a medicine to modify.");
+      return;
+    }
+    if (!editName.trim()) {
+      toast.error("Medicine name is required.");
+      return;
+    }
+    saveLocalMedicineOverride({
+      ...selectedEditMedicine,
+      name: editName.trim(),
+      generic_name: editGenericName.trim() || null,
+      strength: editStrength.trim() || null,
+      form: editForm.trim() || null,
+      category: editCategory.trim() || "Local / Custom",
+      unit: editUnit.trim() || "units",
+      reorder_level: Math.max(0, Number(editReorderLevel) || 0),
+    });
+    onMedicinesChanged();
+    toast.success(`Updated ${editName.trim()}`);
+  };
+
+  const bulkDeleteCandidates = medicines
+    .filter((medicine) => {
+      const q = bulkDeleteFilter.trim().toLowerCase();
+      if (!q)
+        return (
+          medicine.id.startsWith("custom-") || medicine.category === "PHU Akkirampura PDF Stock"
+        );
+      return `${medicine.name} ${medicine.generic_name ?? ""} ${medicine.strength ?? ""}`
+        .toLowerCase()
+        .includes(q);
+    })
+    .slice(0, 80);
+
+  const toggleBulkDelete = (medicineId: string) => {
+    setBulkDeleteIds((ids) =>
+      ids.includes(medicineId) ? ids.filter((id) => id !== medicineId) : [...ids, medicineId],
+    );
+  };
+
+  const bulkDelete = () => {
+    if (bulkDeleteIds.length === 0) {
+      toast.error("Select medicines for bulk delete.");
+      return;
+    }
+    deleteLocalMedicines(bulkDeleteIds);
+    setBulkDeleteIds([]);
+    onMedicinesChanged();
+    toast.success(`Deleted ${bulkDeleteIds.length} medicines from local list`);
   };
 
   const addMedicine = () => {
@@ -1031,6 +1070,96 @@ function SettingsSection({
             </div>
             <Button type="button" className="mt-3" onClick={addMedicine}>
               <Plus className="mr-1 size-4" /> Add medicine
+            </Button>
+          </div>
+
+          <div className="rounded-lg border border-border bg-muted/20 p-3">
+            <div className="text-sm font-medium">Modify medicine details</div>
+            <div className="mt-3 space-y-2">
+              <Select value={editMedicineId} onValueChange={setEditMedicineId}>
+                <SelectTrigger className="h-10">
+                  <SelectValue placeholder="Select medicine to modify" />
+                </SelectTrigger>
+                <SelectContent>
+                  {medicines.map((medicine) => (
+                    <SelectItem key={medicine.id} value={medicine.id}>
+                      {medicine.name} {medicine.strength ? `· ${medicine.strength}` : ""}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+
+              {selectedEditMedicine && (
+                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                  <Input value={editName} onChange={(e) => setEditName(e.target.value)} />
+                  <Input
+                    value={editGenericName}
+                    onChange={(e) => setEditGenericName(e.target.value)}
+                    placeholder="Generic"
+                  />
+                  <Input
+                    value={editStrength}
+                    onChange={(e) => setEditStrength(e.target.value)}
+                    placeholder="Strength"
+                  />
+                  <Input
+                    value={editForm}
+                    onChange={(e) => setEditForm(e.target.value)}
+                    placeholder="Form"
+                  />
+                  <Input
+                    value={editCategory}
+                    onChange={(e) => setEditCategory(e.target.value)}
+                    placeholder="Category"
+                  />
+                  <Input
+                    value={editUnit}
+                    onChange={(e) => setEditUnit(e.target.value)}
+                    placeholder="Unit"
+                  />
+                  <Input
+                    type="number"
+                    min={0}
+                    value={editReorderLevel}
+                    onChange={(e) => setEditReorderLevel(Number(e.target.value) || 0)}
+                    placeholder="Reorder level"
+                  />
+                </div>
+              )}
+              <Button type="button" variant="outline" onClick={updateMedicine}>
+                Save modification
+              </Button>
+            </div>
+          </div>
+
+          <div className="rounded-lg border border-border bg-muted/20 p-3">
+            <div className="text-sm font-medium">Bulk delete medicines</div>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Select multiple medicines to hide/delete from this app. Sheet backup rows remain
+              unchanged.
+            </p>
+            <Input
+              value={bulkDeleteFilter}
+              onChange={(e) => setBulkDeleteFilter(e.target.value)}
+              placeholder="Filter medicines for bulk delete"
+              className="mt-2 h-10"
+            />
+            <div className="mt-2 max-h-48 space-y-1 overflow-auto rounded-md border border-border bg-background p-2">
+              {bulkDeleteCandidates.map((medicine) => (
+                <label key={medicine.id} className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={bulkDeleteIds.includes(medicine.id)}
+                    onChange={() => toggleBulkDelete(medicine.id)}
+                  />
+                  <span className="truncate">
+                    {medicine.name} {medicine.strength ? `· ${medicine.strength}` : ""}
+                  </span>
+                </label>
+              ))}
+            </div>
+            <Button type="button" variant="destructive" className="mt-2" onClick={bulkDelete}>
+              Bulk delete selected ({bulkDeleteIds.length})
             </Button>
           </div>
 
