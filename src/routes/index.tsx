@@ -16,6 +16,7 @@ import {
   Loader2,
   Filter,
 } from "lucide-react";
+import { embeddedMedicines } from "@/data/medicines";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -85,9 +86,36 @@ type StockEntry = {
 };
 
 const today = () => new Date().toISOString().slice(0, 10);
+const LOCAL_STOCK_KEY = "pharmastock-local-stocks";
+
+type LocalStockMap = Record<string, number>;
+
+const getLocalStocks = (): LocalStockMap => {
+  if (typeof window === "undefined") return {};
+  try {
+    return JSON.parse(window.localStorage.getItem(LOCAL_STOCK_KEY) ?? "{}") as LocalStockMap;
+  } catch {
+    return {};
+  }
+};
+
+const setLocalStock = (medicineId: string, stock: number) => {
+  if (typeof window === "undefined") return;
+  const localStocks = getLocalStocks();
+  localStocks[medicineId] = stock;
+  window.localStorage.setItem(LOCAL_STOCK_KEY, JSON.stringify(localStocks));
+};
+
+const getEmbeddedMedicines = (): Medicine[] => {
+  const localStocks = getLocalStocks();
+  return embeddedMedicines.map((m) => ({
+    ...m,
+    current_stock: localStocks[m.id] ?? m.current_stock,
+  })) as Medicine[];
+};
 
 export function StockApp() {
-  const [medicines, setMedicines] = useState<Medicine[]>([]);
+  const [medicines, setMedicines] = useState<Medicine[]>(getEmbeddedMedicines);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [categoryFilter, setCategoryFilter] = useState<string>("all");
@@ -96,15 +124,21 @@ export function StockApp() {
   const [selected, setSelected] = useState<Medicine | null>(null);
 
   const loadMedicines = async () => {
-    setLoading(true);
-    const { data, error } = await supabase
-      .from("medicines")
-      .select("*")
-      .order("name", { ascending: true })
-      .limit(2000);
-    if (error) toast.error(error.message);
-    else setMedicines((data ?? []) as Medicine[]);
+    // Always show the embedded catalog first so the Android app works even
+    // when Supabase env vars or network are unavailable.
+    setMedicines(getEmbeddedMedicines());
     setLoading(false);
+
+    try {
+      const { data, error } = await supabase
+        .from("medicines")
+        .select("*")
+        .order("name", { ascending: true })
+        .limit(2000);
+      if (!error && data?.length) setMedicines(data as Medicine[]);
+    } catch (error) {
+      console.info("Using embedded offline medicine catalog", error);
+    }
   };
 
   useEffect(() => {
@@ -117,7 +151,11 @@ export function StockApp() {
     return Array.from(s).sort();
   }, [medicines]);
 
+  const hasActiveSearch =
+    search.trim().length >= 2 || categoryFilter !== "all" || stockFilter !== "all";
+
   const filtered = useMemo(() => {
+    if (!hasActiveSearch) return [];
     const q = search.trim().toLowerCase();
     return medicines.filter((m) => {
       if (categoryFilter !== "all" && m.category !== categoryFilter) return false;
@@ -131,7 +169,7 @@ export function StockApp() {
         (m.strength ?? "").toLowerCase().includes(q)
       );
     });
-  }, [medicines, search, categoryFilter, stockFilter]);
+  }, [medicines, search, categoryFilter, stockFilter, hasActiveSearch]);
 
   const stats = useMemo(() => {
     const total = medicines.length;
@@ -202,7 +240,11 @@ export function StockApp() {
         </div>
 
         <div className="mt-3 text-sm text-muted-foreground">
-          {loading ? "Loading…" : `${filtered.length} of ${medicines.length} medicines`}
+          {loading
+            ? "Loading…"
+            : hasActiveSearch
+              ? `${filtered.length} of ${medicines.length} medicines`
+              : "Search medicine name/generic, or choose a category to view drugs."}
         </div>
 
         <div className="mt-3 grid grid-cols-1 gap-2 md:grid-cols-2">
@@ -210,9 +252,15 @@ export function StockApp() {
             <div className="col-span-full flex items-center justify-center py-16 text-muted-foreground">
               <Loader2 className="mr-2 size-5 animate-spin" /> Loading medicines…
             </div>
+          ) : !hasActiveSearch ? (
+            <div className="col-span-full rounded-lg border border-dashed bg-card p-10 text-center text-muted-foreground">
+              <Pill className="mx-auto mb-3 size-8 text-primary" />
+              Type at least 2 letters (for example, “para”) or select a category to find drug
+              details.
+            </div>
           ) : filtered.length === 0 ? (
             <div className="col-span-full rounded-lg border border-dashed p-10 text-center text-muted-foreground">
-              No medicines match your filters.
+              No medicines match your search/category.
             </div>
           ) : (
             filtered.map((m) => <MedicineRow key={m.id} m={m} onSelect={() => setSelected(m)} />)
@@ -235,7 +283,10 @@ export function StockApp() {
 
 function Header({ date, setDate }: { date: string; setDate: (d: string) => void }) {
   return (
-    <header className="sticky top-0 z-20 border-b border-border bg-background/85 backdrop-blur">
+    <header
+      className="sticky top-0 z-20 border-b border-border bg-background/85 backdrop-blur"
+      style={{ paddingTop: "env(safe-area-inset-top)" }}
+    >
       <div className="mx-auto flex w-full max-w-6xl items-center justify-between gap-3 px-4 py-3">
         <div className="flex items-center gap-2">
           <div className="grid size-9 place-items-center rounded-lg bg-primary text-primary-foreground">
@@ -369,30 +420,37 @@ function EntryDialog({
     setNotes("");
     setExistingId(null);
     (async () => {
-      const { data: existing } = await supabase
-        .from("stock_entries")
-        .select("*")
-        .eq("medicine_id", medicine.id)
-        .eq("entry_date", date)
-        .maybeSingle();
-
-      if (existing) {
-        const e = existing as StockEntry;
-        setExistingId(e.id);
-        setOpening(e.opening_stock);
-        setReceived(e.received);
-        setDispensed(e.dispensed);
-        setNotes(e.notes ?? "");
-      } else {
-        const { data: prev } = await supabase
+      try {
+        const { data: existing } = await supabase
           .from("stock_entries")
-          .select("closing_stock")
+          .select("*")
           .eq("medicine_id", medicine.id)
-          .lt("entry_date", date)
-          .order("entry_date", { ascending: false })
-          .limit(1)
+          .eq("entry_date", date)
           .maybeSingle();
-        setOpening(prev?.closing_stock ?? medicine.current_stock);
+
+        if (existing) {
+          const e = existing as StockEntry;
+          setExistingId(e.id);
+          setOpening(e.opening_stock);
+          setReceived(e.received);
+          setDispensed(e.dispensed);
+          setNotes(e.notes ?? "");
+        } else {
+          const { data: prev } = await supabase
+            .from("stock_entries")
+            .select("closing_stock")
+            .eq("medicine_id", medicine.id)
+            .lt("entry_date", date)
+            .order("entry_date", { ascending: false })
+            .limit(1)
+            .maybeSingle();
+          setOpening(prev?.closing_stock ?? medicine.current_stock);
+          setReceived(0);
+          setDispensed(0);
+        }
+      } catch (error) {
+        console.info("Using local stock entry mode", error);
+        setOpening(medicine.current_stock);
         setReceived(0);
         setDispensed(0);
       }
@@ -417,14 +475,16 @@ function EntryDialog({
       closing_stock: closing,
       notes: notes.trim() || null,
     };
-    const res = existingId
-      ? await supabase.from("stock_entries").update(payload).eq("id", existingId)
-      : await supabase.from("stock_entries").insert(payload);
-    setSaving(false);
-    if (res.error) {
-      toast.error(res.error.message);
-      return;
+    try {
+      const res = existingId
+        ? await supabase.from("stock_entries").update(payload).eq("id", existingId)
+        : await supabase.from("stock_entries").insert(payload);
+      if (res.error) throw res.error;
+    } catch (error) {
+      console.info("Saving stock locally because Supabase is unavailable", error);
+      setLocalStock(medicine.id, closing);
     }
+    setSaving(false);
     toast.success(`Saved entry for ${medicine.name}`);
     onSaved();
   };
