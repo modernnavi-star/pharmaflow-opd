@@ -15,6 +15,9 @@ import {
   X,
   Loader2,
   Filter,
+  Mic,
+  FileText,
+  FileSpreadsheet,
 } from "lucide-react";
 import { embeddedMedicines } from "@/data/medicines";
 import { supabase } from "@/integrations/supabase/client";
@@ -93,6 +96,23 @@ type PackType = "tablets" | "sheets" | "boxes";
 
 type LocalStockMap = Record<string, number>;
 
+type SpeechRecognitionLike = {
+  lang: string;
+  interimResults: boolean;
+  maxAlternatives: number;
+  onresult: ((event: { results?: ArrayLike<ArrayLike<{ transcript?: string }>> }) => void) | null;
+  onerror: (() => void) | null;
+  onend: (() => void) | null;
+  start: () => void;
+};
+
+type SpeechRecognitionConstructor = new () => SpeechRecognitionLike;
+
+type SpeechWindow = Window & {
+  SpeechRecognition?: SpeechRecognitionConstructor;
+  webkitSpeechRecognition?: SpeechRecognitionConstructor;
+};
+
 type LocalReportEntry = {
   id: string;
   medicine_id: string;
@@ -155,6 +175,44 @@ const packLabel = (packType: PackType) => {
   if (packType === "sheets") return "sheets";
   return "tablets/units";
 };
+
+const escapeCsv = (value: unknown) => {
+  const text = String(value ?? "");
+  return `"${text.replace(/"/g, '""')}"`;
+};
+
+const downloadTextFile = (filename: string, content: string, type: string) => {
+  if (typeof window === "undefined") return;
+  const blob = new Blob([content], { type });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+};
+
+const parseDateLike = (value: string) => {
+  const match = value.match(/(\d{4}-\d{1,2}-\d{1,2}|\d{1,2}[/-]\d{1,2}[/-]\d{2,4})/);
+  if (!match) return "";
+  const raw = match[1];
+  if (raw.includes("-") && raw.split("-")[0].length === 4) {
+    const [y, m, d] = raw.split("-");
+    return `${y.padStart(4, "0")}-${m.padStart(2, "0")}-${d.padStart(2, "0")}`;
+  }
+  const [d, m, y] = raw.split(/[/-]/);
+  const fullYear = y.length === 2 ? `20${y}` : y;
+  return `${fullYear.padStart(4, "0")}-${m.padStart(2, "0")}-${d.padStart(2, "0")}`;
+};
+
+const getNearExpiryEntries = (entries: LocalReportEntry[]) =>
+  entries
+    .filter((entry) => {
+      if (!entry.expiry_date) return false;
+      const days = (new Date(entry.expiry_date).getTime() - Date.now()) / 86400000;
+      return days >= 0 && days <= 90;
+    })
+    .sort((a, b) => String(a.expiry_date).localeCompare(String(b.expiry_date)));
 
 const getEmbeddedMedicines = (): Medicine[] => {
   const localStocks = getLocalStocks();
@@ -231,6 +289,88 @@ export function StockApp() {
     return { total, low, out, totalUnits };
   }, [medicines]);
 
+  const applyQuickCommand = (command: string) => {
+    const normalized = command.toLowerCase().trim();
+    if (!normalized) return;
+
+    const action: "add" | "issue" = /\b(issue|dispense|dispensed|give|given|out)\b/.test(normalized)
+      ? "issue"
+      : "add";
+
+    const quantity = Number(normalized.match(/\d+/)?.[0] ?? 0);
+    if (!quantity) {
+      toast.error("Please include quantity, e.g. 'issue paracetamol 10 tablets'.");
+      return;
+    }
+
+    const packType: PackType = /\bbox(es)?\b/.test(normalized)
+      ? "boxes"
+      : /\bsheet(s)?\b/.test(normalized)
+        ? "sheets"
+        : "tablets";
+    const unitsPerPack = packType === "tablets" ? 1 : 10;
+    const units = packToUnits(packType, quantity, unitsPerPack);
+
+    const matched = medicines
+      .map((medicine) => {
+        const names = [medicine.name, medicine.generic_name]
+          .filter(Boolean)
+          .map((v) => v!.toLowerCase());
+        const score = Math.max(
+          ...names.map((name) => (normalized.includes(name) ? name.length : 0)),
+        );
+        return { medicine, score };
+      })
+      .sort((a, b) => b.score - a.score)[0];
+
+    if (!matched?.score) {
+      toast.error("Drug not found. Try full drug name, e.g. 'add paracetamol 20'.");
+      return;
+    }
+
+    const medicine = matched.medicine;
+    const opening = medicine.current_stock;
+    const received = action === "add" ? units : 0;
+    const dispensed = action === "issue" ? units : 0;
+    if (dispensed > opening) {
+      toast.error(`Only ${opening} ${medicine.unit} available for ${medicine.name}.`);
+      return;
+    }
+    const closing = opening + received - dispensed;
+    const batchNo = command.match(/batch\s*[:#-]?\s*([a-zA-Z0-9-]+)/)?.[1] ?? "";
+    const expiryDate = parseDateLike(
+      command.match(/exp(?:iry|ire|ires)?\s*[:#-]?\s*([\d/-]+)/i)?.[1] ?? "",
+    );
+
+    setLocalStock(medicine.id, closing);
+    upsertLocalEntry({
+      id: `${medicine.id}-${date}-${Date.now()}`,
+      medicine_id: medicine.id,
+      medicine_name: medicine.name,
+      generic_name: medicine.generic_name,
+      category: medicine.category,
+      entry_date: date,
+      opening_stock: opening,
+      received,
+      dispensed,
+      closing_stock: closing,
+      batch_no: action === "add" ? batchNo || null : null,
+      expiry_date: action === "add" ? expiryDate || null : null,
+      received_pack_type: action === "add" ? packType : "tablets",
+      received_pack_qty: action === "add" ? quantity : 0,
+      issue_pack_type: action === "issue" ? packType : "tablets",
+      issue_pack_qty: action === "issue" ? quantity : 0,
+      notes: `Quick ${action === "add" ? "inward" : "issue"}: ${command}`,
+    });
+
+    setMedicines((prev) =>
+      prev.map((item) => (item.id === medicine.id ? { ...item, current_stock: closing } : item)),
+    );
+    toast.success(
+      `${action === "add" ? "Added" : "Issued"} ${units} ${medicine.unit} ${action === "add" ? "to" : "from"} ${medicine.name}`,
+    );
+  };
+
   return (
     <div className="min-h-screen bg-background text-foreground">
       <Toaster position="top-center" richColors />
@@ -239,6 +379,7 @@ export function StockApp() {
       <main className="mx-auto w-full max-w-6xl px-4 pb-24 pt-6 sm:pt-8">
         <StatsRow stats={stats} />
         <ReportsSection date={date} medicines={medicines} />
+        <QuickCommandBox onApply={applyQuickCommand} />
 
         <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:items-center">
           <div className="relative flex-1">
@@ -332,6 +473,75 @@ export function StockApp() {
   );
 }
 
+function QuickCommandBox({ onApply }: { onApply: (command: string) => void }) {
+  const [command, setCommand] = useState("");
+  const [listening, setListening] = useState(false);
+
+  const runCommand = (value = command) => {
+    if (!value.trim()) return;
+    onApply(value);
+    setCommand("");
+  };
+
+  const startVoice = () => {
+    if (typeof window === "undefined") return;
+    const speechWindow = window as SpeechWindow;
+    const SpeechRecognition =
+      speechWindow.SpeechRecognition || speechWindow.webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      toast.error("Voice input is not supported on this device/browser.");
+      return;
+    }
+    const recognition = new SpeechRecognition();
+    recognition.lang = "en-IN";
+    recognition.interimResults = false;
+    recognition.maxAlternatives = 1;
+    setListening(true);
+    recognition.onresult = (event) => {
+      const text = event.results?.[0]?.[0]?.transcript ?? "";
+      setCommand(text);
+      if (text) runCommand(text);
+    };
+    recognition.onerror = () => toast.error("Could not hear clearly. Please try again.");
+    recognition.onend = () => setListening(false);
+    recognition.start();
+  };
+
+  return (
+    <Card className="mt-4 p-3">
+      <div className="flex items-center justify-between gap-2">
+        <div>
+          <div className="text-sm font-semibold">AI voice / typing stock entry</div>
+          <div className="text-xs text-muted-foreground">
+            Say or type: “add paracetamol 20 tablets batch B12 expiry 30/12/2026” or “dispense
+            paracetamol 5”.
+          </div>
+        </div>
+        <Button
+          type="button"
+          variant={listening ? "default" : "outline"}
+          size="sm"
+          onClick={startVoice}
+        >
+          <Mic className="mr-1 size-4" /> {listening ? "Listening" : "Voice"}
+        </Button>
+      </div>
+      <div className="mt-3 flex gap-2">
+        <Input
+          value={command}
+          onChange={(e) => setCommand(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && runCommand()}
+          placeholder="Type add/dispense command…"
+          className="h-10"
+        />
+        <Button type="button" onClick={() => runCommand()}>
+          Apply
+        </Button>
+      </div>
+    </Card>
+  );
+}
+
 function ReportsSection({ date, medicines }: { date: string; medicines: Medicine[] }) {
   const [mode, setMode] = useState<"daily" | "monthly" | "yearly">("daily");
   const [entries, setEntries] = useState<LocalReportEntry[]>([]);
@@ -352,13 +562,11 @@ function ReportsSection({ date, medicines }: { date: string; medicines: Medicine
     const received = filteredEntries.reduce((sum, entry) => sum + entry.received, 0);
     const issued = filteredEntries.reduce((sum, entry) => sum + entry.dispensed, 0);
     const uniqueMedicines = new Set(filteredEntries.map((entry) => entry.medicine_id)).size;
-    const expiringSoon = filteredEntries.filter((entry) => {
-      if (!entry.expiry_date) return false;
-      const days = (new Date(entry.expiry_date).getTime() - Date.now()) / 86400000;
-      return days >= 0 && days <= 90;
-    }).length;
+    const expiringSoon = getNearExpiryEntries(filteredEntries).length;
     return { received, issued, uniqueMedicines, expiringSoon };
   }, [filteredEntries]);
+
+  const nearExpiryEntries = useMemo(() => getNearExpiryEntries(entries), [entries]);
 
   const title =
     mode === "daily"
@@ -367,6 +575,52 @@ function ReportsSection({ date, medicines }: { date: string; medicines: Medicine
         ? `Monthly report · ${date.slice(0, 7)}`
         : `Yearly report · ${date.slice(0, 4)}`;
 
+  const exportRows = filteredEntries.map((entry) => [
+    entry.entry_date,
+    entry.medicine_name,
+    entry.generic_name ?? "",
+    entry.category ?? "",
+    entry.opening_stock,
+    entry.received,
+    entry.dispensed,
+    entry.closing_stock,
+    entry.batch_no ?? "",
+    entry.expiry_date ?? "",
+    entry.notes ?? "",
+  ]);
+
+  const exportExcel = () => {
+    const headers = [
+      "Date",
+      "Drug",
+      "Generic",
+      "Category",
+      "Opening",
+      "Inward",
+      "Issued",
+      "Closing",
+      "Batch",
+      "Expiry",
+      "Notes",
+    ];
+    const csv = [headers, ...exportRows].map((row) => row.map(escapeCsv).join(",")).join("\n");
+    downloadTextFile(`pharmastock-${mode}-${date}.csv`, csv, "text/csv;charset=utf-8");
+  };
+
+  const exportPdf = () => {
+    const htmlRows = exportRows
+      .map(
+        (row) =>
+          `<tr>${row.map((cell) => `<td>${String(cell).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]!)}</td>`).join("")}</tr>`,
+      )
+      .join("");
+    const html = `<!doctype html><html><head><title>${title}</title><style>body{font-family:Arial,sans-serif;padding:20px}h1{font-size:20px}table{width:100%;border-collapse:collapse;font-size:11px}td,th{border:1px solid #999;padding:5px;text-align:left}.stats{display:flex;gap:12px;margin:12px 0}.stat{border:1px solid #999;padding:8px}</style></head><body><h1>${title}</h1><div class="stats"><div class="stat">Inward: ${report.received}</div><div class="stat">Issued: ${report.issued}</div><div class="stat">Drug items: ${report.uniqueMedicines}</div><div class="stat">Near expiry: ${report.expiringSoon}</div></div><table><thead><tr>${["Date", "Drug", "Generic", "Category", "Opening", "Inward", "Issued", "Closing", "Batch", "Expiry", "Notes"].map((h) => `<th>${h}</th>`).join("")}</tr></thead><tbody>${htmlRows}</tbody></table><script>window.print()</script></body></html>`;
+    const win = window.open("", "_blank");
+    if (!win) return toast.error("Popup blocked. Allow popups to generate PDF.");
+    win.document.write(html);
+    win.document.close();
+  };
+
   return (
     <Card className="mt-4 p-3">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -374,19 +628,29 @@ function ReportsSection({ date, medicines }: { date: string; medicines: Medicine
           <div className="text-sm font-semibold">Reports</div>
           <div className="text-xs text-muted-foreground">{title}</div>
         </div>
-        <div className="grid grid-cols-3 gap-1 rounded-lg bg-muted p-1">
-          {(["daily", "monthly", "yearly"] as const).map((item) => (
-            <Button
-              key={item}
-              type="button"
-              size="sm"
-              variant={mode === item ? "default" : "ghost"}
-              className="h-8 capitalize"
-              onClick={() => setMode(item)}
-            >
-              {item}
+        <div className="flex flex-col gap-2 sm:items-end">
+          <div className="grid grid-cols-3 gap-1 rounded-lg bg-muted p-1">
+            {(["daily", "monthly", "yearly"] as const).map((item) => (
+              <Button
+                key={item}
+                type="button"
+                size="sm"
+                variant={mode === item ? "default" : "ghost"}
+                className="h-8 capitalize"
+                onClick={() => setMode(item)}
+              >
+                {item}
+              </Button>
+            ))}
+          </div>
+          <div className="flex gap-2">
+            <Button type="button" size="sm" variant="outline" onClick={exportPdf}>
+              <FileText className="mr-1 size-4" /> PDF
             </Button>
-          ))}
+            <Button type="button" size="sm" variant="outline" onClick={exportExcel}>
+              <FileSpreadsheet className="mr-1 size-4" /> Excel
+            </Button>
+          </div>
         </div>
       </div>
 
@@ -396,6 +660,24 @@ function ReportsSection({ date, medicines }: { date: string; medicines: Medicine
         <ReportStat label="Drug items" value={report.uniqueMedicines} />
         <ReportStat label="Expiring ≤90d" value={report.expiringSoon} />
       </div>
+
+      {nearExpiryEntries.length > 0 && (
+        <div className="mt-3 rounded-lg border border-warning/40 bg-warning/10 p-3">
+          <div className="flex items-center gap-2 text-sm font-semibold text-warning-foreground">
+            <AlertTriangle className="size-4" /> Near expiry warning (within 3 months)
+          </div>
+          <div className="mt-2 space-y-1 text-xs">
+            {nearExpiryEntries.slice(0, 6).map((entry) => (
+              <div key={`${entry.id}-expiry`} className="flex justify-between gap-2">
+                <span className="truncate">
+                  {entry.medicine_name} {entry.batch_no ? `· Batch ${entry.batch_no}` : ""}
+                </span>
+                <span className="shrink-0 font-medium">Exp {entry.expiry_date}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {filteredEntries.length > 0 && (
         <div className="mt-3 overflow-hidden rounded-lg border border-border">
