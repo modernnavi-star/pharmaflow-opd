@@ -16,6 +16,7 @@
     "android:build": "npm run android:sync && cd android && ./gradlew assembleDebug"
   },
   "dependencies": {
+    "@capacitor-community/speech-recognition": "^7.0.1",
     "@capacitor/android": "^7.6.0",
     "@capacitor/cli": "^7.6.0",
     "@capacitor/core": "^7.6.0",

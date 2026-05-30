@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
+import { SpeechRecognition } from "@capacitor-community/speech-recognition";
 import { Toaster, toast } from "sonner";
 import {
   Search,
@@ -118,6 +119,7 @@ type LocalReportEntry = {
   medicine_id: string;
   medicine_name: string;
   generic_name: string | null;
+  strength: string | null;
   category: string | null;
   entry_date: string;
   opening_stock: number;
@@ -165,6 +167,7 @@ const upsertLocalEntry = (entry: LocalReportEntry) => {
   if (existingIndex >= 0) entries[existingIndex] = entry;
   else entries.push(entry);
   window.localStorage.setItem(LOCAL_ENTRIES_KEY, JSON.stringify(entries));
+  window.dispatchEvent(new Event("pharmastock-entries-updated"));
 };
 
 const packToUnits = (packType: PackType, quantity: number, unitsPerPack: number) =>
@@ -297,7 +300,11 @@ export function StockApp() {
       ? "issue"
       : "add";
 
-    const quantity = Number(normalized.match(/\d+/)?.[0] ?? 0);
+    const commandWithoutExpiry = normalized.replace(/exp(?:iry|ire|ires)?\s*[:#-]?\s*[\d/-]+/g, "");
+    const quantityMatch =
+      commandWithoutExpiry.match(/(\d+)\s*(tablet|tablets|unit|units|sheet|sheets|box|boxes)\b/) ??
+      commandWithoutExpiry.match(/\b(\d+)\b/);
+    const quantity = Number(quantityMatch?.[1] ?? 0);
     if (!quantity) {
       toast.error("Please include quantity, e.g. 'issue paracetamol 10 tablets'.");
       return;
@@ -311,13 +318,30 @@ export function StockApp() {
     const unitsPerPack = packType === "tablets" ? 1 : 10;
     const units = packToUnits(packType, quantity, unitsPerPack);
 
+    const searchableCommand = commandWithoutExpiry
+      .replace(
+        /\b(add|inward|receive|received|issue|dispense|dispensed|give|given|out|tablet|tablets|unit|units|sheet|sheets|box|boxes|batch)\b/g,
+        " ",
+      )
+      .replace(/[0-9:#/-]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    const commandTokens = searchableCommand.split(" ").filter((token) => token.length >= 3);
+
     const matched = medicines
       .map((medicine) => {
-        const names = [medicine.name, medicine.generic_name]
+        const haystack = [
+          medicine.name,
+          medicine.generic_name,
+          medicine.strength,
+          medicine.category,
+        ]
           .filter(Boolean)
-          .map((v) => v!.toLowerCase());
-        const score = Math.max(
-          ...names.map((name) => (normalized.includes(name) ? name.length : 0)),
+          .join(" ")
+          .toLowerCase();
+        const score = commandTokens.reduce(
+          (sum, token) => sum + (haystack.includes(token) ? token.length : 0),
+          0,
         );
         return { medicine, score };
       })
@@ -348,6 +372,7 @@ export function StockApp() {
       medicine_id: medicine.id,
       medicine_name: medicine.name,
       generic_name: medicine.generic_name,
+      strength: medicine.strength,
       category: medicine.category,
       entry_date: date,
       opening_stock: opening,
@@ -483,20 +508,48 @@ function QuickCommandBox({ onApply }: { onApply: (command: string) => void }) {
     setCommand("");
   };
 
-  const startVoice = () => {
+  const startVoice = async () => {
     if (typeof window === "undefined") return;
+    setListening(true);
+
+    try {
+      const available = await SpeechRecognition.available();
+      if (available.available) {
+        const permission = await SpeechRecognition.checkPermissions();
+        if (permission.speechRecognition !== "granted") {
+          await SpeechRecognition.requestPermissions();
+        }
+        const result = await SpeechRecognition.start({
+          language: "en-IN",
+          maxResults: 1,
+          prompt: "Say medicine stock command",
+          partialResults: false,
+          popup: true,
+        });
+        const text = result.matches?.[0] ?? "";
+        if (text) {
+          setCommand(text);
+          runCommand(text);
+        }
+        setListening(false);
+        return;
+      }
+    } catch (error) {
+      console.info("Native speech recognition unavailable, trying web speech", error);
+    }
+
     const speechWindow = window as SpeechWindow;
-    const SpeechRecognition =
+    const WebSpeechRecognition =
       speechWindow.SpeechRecognition || speechWindow.webkitSpeechRecognition;
-    if (!SpeechRecognition) {
-      toast.error("Voice input is not supported on this device/browser.");
+    if (!WebSpeechRecognition) {
+      setListening(false);
+      toast.error("Voice input is not supported on this device. Please use typing box.");
       return;
     }
-    const recognition = new SpeechRecognition();
+    const recognition = new WebSpeechRecognition();
     recognition.lang = "en-IN";
     recognition.interimResults = false;
     recognition.maxAlternatives = 1;
-    setListening(true);
     recognition.onresult = (event) => {
       const text = event.results?.[0]?.[0]?.transcript ?? "";
       setCommand(text);
@@ -547,7 +600,10 @@ function ReportsSection({ date, medicines }: { date: string; medicines: Medicine
   const [entries, setEntries] = useState<LocalReportEntry[]>([]);
 
   useEffect(() => {
-    setEntries(getLocalEntries());
+    const refreshEntries = () => setEntries(getLocalEntries());
+    refreshEntries();
+    window.addEventListener("pharmastock-entries-updated", refreshEntries);
+    return () => window.removeEventListener("pharmastock-entries-updated", refreshEntries);
   }, [date, medicines]);
 
   const filteredEntries = useMemo(() => {
@@ -579,6 +635,7 @@ function ReportsSection({ date, medicines }: { date: string; medicines: Medicine
     entry.entry_date,
     entry.medicine_name,
     entry.generic_name ?? "",
+    entry.strength ?? "",
     entry.category ?? "",
     entry.opening_stock,
     entry.received,
@@ -594,6 +651,7 @@ function ReportsSection({ date, medicines }: { date: string; medicines: Medicine
       "Date",
       "Drug",
       "Generic",
+      "Strength",
       "Category",
       "Opening",
       "Inward",
@@ -614,7 +672,7 @@ function ReportsSection({ date, medicines }: { date: string; medicines: Medicine
           `<tr>${row.map((cell) => `<td>${String(cell).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]!)}</td>`).join("")}</tr>`,
       )
       .join("");
-    const html = `<!doctype html><html><head><title>${title}</title><style>body{font-family:Arial,sans-serif;padding:20px}h1{font-size:20px}table{width:100%;border-collapse:collapse;font-size:11px}td,th{border:1px solid #999;padding:5px;text-align:left}.stats{display:flex;gap:12px;margin:12px 0}.stat{border:1px solid #999;padding:8px}</style></head><body><h1>${title}</h1><div class="stats"><div class="stat">Inward: ${report.received}</div><div class="stat">Issued: ${report.issued}</div><div class="stat">Drug items: ${report.uniqueMedicines}</div><div class="stat">Near expiry: ${report.expiringSoon}</div></div><table><thead><tr>${["Date", "Drug", "Generic", "Category", "Opening", "Inward", "Issued", "Closing", "Batch", "Expiry", "Notes"].map((h) => `<th>${h}</th>`).join("")}</tr></thead><tbody>${htmlRows}</tbody></table><script>window.print()</script></body></html>`;
+    const html = `<!doctype html><html><head><title>${title}</title><style>body{font-family:Arial,sans-serif;padding:20px}h1{font-size:20px}table{width:100%;border-collapse:collapse;font-size:11px}td,th{border:1px solid #999;padding:5px;text-align:left}.stats{display:flex;gap:12px;margin:12px 0}.stat{border:1px solid #999;padding:8px}</style></head><body><h1>${title}</h1><div class="stats"><div class="stat">Inward: ${report.received}</div><div class="stat">Issued: ${report.issued}</div><div class="stat">Drug items: ${report.uniqueMedicines}</div><div class="stat">Near expiry: ${report.expiringSoon}</div></div><table><thead><tr>${["Date", "Drug", "Generic", "Strength", "Category", "Opening", "Inward", "Issued", "Closing", "Batch", "Expiry", "Notes"].map((h) => `<th>${h}</th>`).join("")}</tr></thead><tbody>${htmlRows}</tbody></table><script>window.print()</script></body></html>`;
     const win = window.open("", "_blank");
     if (!win) return toast.error("Popup blocked. Allow popups to generate PDF.");
     win.document.write(html);
@@ -670,7 +728,8 @@ function ReportsSection({ date, medicines }: { date: string; medicines: Medicine
             {nearExpiryEntries.slice(0, 6).map((entry) => (
               <div key={`${entry.id}-expiry`} className="flex justify-between gap-2">
                 <span className="truncate">
-                  {entry.medicine_name} {entry.batch_no ? `· Batch ${entry.batch_no}` : ""}
+                  {entry.medicine_name} {entry.strength ? `· ${entry.strength}` : ""}{" "}
+                  {entry.batch_no ? `· Batch ${entry.batch_no}` : ""}
                 </span>
                 <span className="shrink-0 font-medium">Exp {entry.expiry_date}</span>
               </div>
@@ -695,7 +754,9 @@ function ReportsSection({ date, medicines }: { date: string; medicines: Medicine
                 className="grid grid-cols-[1fr_auto_auto] gap-2 border-t border-border px-3 py-2 text-xs"
               >
                 <div className="min-w-0">
-                  <div className="truncate font-medium">{entry.medicine_name}</div>
+                  <div className="truncate font-medium">
+                    {entry.medicine_name} {entry.strength ? `· ${entry.strength}` : ""}
+                  </div>
                   <div className="truncate text-muted-foreground">
                     {entry.entry_date}
                     {entry.batch_no ? ` · Batch ${entry.batch_no}` : ""}
@@ -963,6 +1024,7 @@ function EntryDialog({
       medicine_id: medicine.id,
       medicine_name: medicine.name,
       generic_name: medicine.generic_name,
+      strength: medicine.strength,
       category: medicine.category,
       entry_date: date,
       opening_stock: opening,
