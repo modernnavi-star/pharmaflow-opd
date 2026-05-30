@@ -89,6 +89,8 @@ type StockEntry = {
 const today = () => new Date().toISOString().slice(0, 10);
 const LOCAL_STOCK_KEY = "pharmastock-local-stocks";
 const LOCAL_ENTRIES_KEY = "pharmastock-local-entries";
+const LOCAL_CUSTOM_MEDICINES_KEY = "pharmastock-custom-medicines";
+const LOCAL_DELETED_MEDICINES_KEY = "pharmastock-deleted-medicines";
 
 type PackType = "tablets" | "sheets" | "boxes";
 
@@ -257,9 +259,67 @@ const getNearExpiryEntries = (entries: LocalReportEntry[]) =>
     })
     .sort((a, b) => String(a.expiry_date).localeCompare(String(b.expiry_date)));
 
+const getCustomMedicines = (): Medicine[] => {
+  if (typeof window === "undefined") return [];
+  try {
+    return JSON.parse(
+      window.localStorage.getItem(LOCAL_CUSTOM_MEDICINES_KEY) ?? "[]",
+    ) as Medicine[];
+  } catch {
+    return [];
+  }
+};
+
+const setCustomMedicines = (medicines: Medicine[]) => {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(LOCAL_CUSTOM_MEDICINES_KEY, JSON.stringify(medicines));
+};
+
+const getDeletedMedicineIds = (): string[] => {
+  if (typeof window === "undefined") return [];
+  try {
+    return JSON.parse(window.localStorage.getItem(LOCAL_DELETED_MEDICINES_KEY) ?? "[]") as string[];
+  } catch {
+    return [];
+  }
+};
+
+const setDeletedMedicineIds = (ids: string[]) => {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(
+    LOCAL_DELETED_MEDICINES_KEY,
+    JSON.stringify(Array.from(new Set(ids))),
+  );
+};
+
+const addCustomMedicine = (medicine: Omit<Medicine, "id" | "updated_at" | "current_stock">) => {
+  const customMedicines = getCustomMedicines();
+  const slug = medicine.name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "");
+  const newMedicine: Medicine = {
+    ...medicine,
+    id: `custom-${Date.now()}-${slug}`,
+    current_stock: 0,
+    updated_at: new Date().toISOString(),
+  };
+  setCustomMedicines([...customMedicines, newMedicine]);
+  return newMedicine;
+};
+
+const deleteLocalMedicine = (medicineId: string) => {
+  setCustomMedicines(getCustomMedicines().filter((medicine) => medicine.id !== medicineId));
+  setDeletedMedicineIds([...getDeletedMedicineIds(), medicineId]);
+};
+
 const getEmbeddedMedicines = (): Medicine[] => {
   const localStocks = getLocalStocks();
-  return embeddedMedicines.map((m) => ({
+  const deletedIds = new Set(getDeletedMedicineIds());
+  const catalog = [...embeddedMedicines, ...getCustomMedicines()].filter(
+    (medicine) => !deletedIds.has(medicine.id),
+  );
+  return catalog.map((m) => ({
     ...m,
     current_stock: localStocks[m.id] ?? m.current_stock,
   })) as Medicine[];
@@ -331,6 +391,10 @@ export function StockApp() {
     const totalUnits = medicines.reduce((s, m) => s + m.current_stock, 0);
     return { total, low, out, totalUnits };
   }, [medicines]);
+
+  const reloadLocalMedicines = () => {
+    setMedicines(getEmbeddedMedicines());
+  };
 
   const applyQuickCommand = (command: string) => {
     const normalized = command.toLowerCase().trim();
@@ -451,6 +515,7 @@ export function StockApp() {
 
       <main className="mx-auto w-full max-w-6xl px-4 pb-24 pt-6 sm:pt-8">
         <UsefulLinksSection />
+        <SettingsSection medicines={medicines} onMedicinesChanged={reloadLocalMedicines} />
         <ReportsSection date={date} medicines={medicines} />
         <QuickCommandBox onApply={applyQuickCommand} />
 
@@ -570,9 +635,10 @@ function UsefulLinksSection() {
       action: () => document.getElementById("voice-entry")?.scrollIntoView({ behavior: "smooth" }),
     },
     {
-      label: "Official EML reference",
-      description: "Open Government essential medicine information online",
-      action: () => openExternal("https://nhm.gov.in"),
+      label: "Settings",
+      description: "Add or delete local medicines in this app",
+      action: () =>
+        document.getElementById("settings-section")?.scrollIntoView({ behavior: "smooth" }),
     },
   ];
 
@@ -592,6 +658,178 @@ function UsefulLinksSection() {
           </button>
         ))}
       </div>
+    </Card>
+  );
+}
+
+function SettingsSection({
+  medicines,
+  onMedicinesChanged,
+}: {
+  medicines: Medicine[];
+  onMedicinesChanged: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState("");
+  const [genericName, setGenericName] = useState("");
+  const [strength, setStrength] = useState("");
+  const [form, setForm] = useState("Tablet");
+  const [category, setCategory] = useState("Local / Custom");
+  const [unit, setUnit] = useState("tablets/units");
+  const [reorderLevel, setReorderLevel] = useState(50);
+  const [deleteMedicineId, setDeleteMedicineId] = useState("");
+
+  const addMedicine = () => {
+    if (!name.trim()) {
+      toast.error("Medicine name is required.");
+      return;
+    }
+    const created = addCustomMedicine({
+      name: name.trim(),
+      generic_name: genericName.trim() || null,
+      strength: strength.trim() || null,
+      form: form.trim() || null,
+      category: category.trim() || "Local / Custom",
+      unit: unit.trim() || "tablets/units",
+      reorder_level: Math.max(0, Number(reorderLevel) || 0),
+    });
+    setName("");
+    setGenericName("");
+    setStrength("");
+    setForm("Tablet");
+    setCategory("Local / Custom");
+    setUnit("tablets/units");
+    setReorderLevel(50);
+    onMedicinesChanged();
+    toast.success(`Added ${created.name}`);
+  };
+
+  const deleteMedicine = () => {
+    const medicine = medicines.find((m) => m.id === deleteMedicineId);
+    if (!medicine) {
+      toast.error("Select a medicine to delete.");
+      return;
+    }
+    deleteLocalMedicine(medicine.id);
+    setDeleteMedicineId("");
+    onMedicinesChanged();
+    toast.success(`Deleted ${medicine.name} from local list`);
+  };
+
+  return (
+    <Card id="settings-section" className="mt-4 p-3">
+      <div className="flex items-center justify-between gap-2">
+        <div>
+          <div className="text-sm font-semibold">Settings</div>
+          <div className="text-xs text-muted-foreground">
+            Add a new local medicine or delete a medicine from this app.
+          </div>
+        </div>
+        <Button type="button" variant="outline" size="sm" onClick={() => setOpen((v) => !v)}>
+          {open ? "Close" : "Open"}
+        </Button>
+      </div>
+
+      {open && (
+        <div className="mt-3 space-y-4">
+          <div className="rounded-lg border border-border bg-muted/20 p-3">
+            <div className="text-sm font-medium">Add new medicine</div>
+            <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
+              <div>
+                <Label>Medicine name *</Label>
+                <Input
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  placeholder="e.g. Paracetamol"
+                  className="mt-1 h-10"
+                />
+              </div>
+              <div>
+                <Label>Generic name</Label>
+                <Input
+                  value={genericName}
+                  onChange={(e) => setGenericName(e.target.value)}
+                  placeholder="e.g. Acetaminophen"
+                  className="mt-1 h-10"
+                />
+              </div>
+              <div>
+                <Label>Strength</Label>
+                <Input
+                  value={strength}
+                  onChange={(e) => setStrength(e.target.value)}
+                  placeholder="e.g. 500 mg"
+                  className="mt-1 h-10"
+                />
+              </div>
+              <div>
+                <Label>Form</Label>
+                <Input
+                  value={form}
+                  onChange={(e) => setForm(e.target.value)}
+                  placeholder="Tablet / Syrup / Injection"
+                  className="mt-1 h-10"
+                />
+              </div>
+              <div>
+                <Label>Category</Label>
+                <Input
+                  value={category}
+                  onChange={(e) => setCategory(e.target.value)}
+                  placeholder="Category"
+                  className="mt-1 h-10"
+                />
+              </div>
+              <div>
+                <Label>Unit</Label>
+                <Input
+                  value={unit}
+                  onChange={(e) => setUnit(e.target.value)}
+                  placeholder="tablets / bottles / vials"
+                  className="mt-1 h-10"
+                />
+              </div>
+              <div>
+                <Label>Reorder level</Label>
+                <Input
+                  type="number"
+                  min={0}
+                  value={reorderLevel}
+                  onChange={(e) => setReorderLevel(Number(e.target.value) || 0)}
+                  className="mt-1 h-10"
+                />
+              </div>
+            </div>
+            <Button type="button" className="mt-3" onClick={addMedicine}>
+              <Plus className="mr-1 size-4" /> Add medicine
+            </Button>
+          </div>
+
+          <div className="rounded-lg border border-border bg-muted/20 p-3">
+            <div className="text-sm font-medium">Delete medicine from local app list</div>
+            <div className="mt-3 flex flex-col gap-2 sm:flex-row">
+              <Select value={deleteMedicineId} onValueChange={setDeleteMedicineId}>
+                <SelectTrigger className="h-10 flex-1">
+                  <SelectValue placeholder="Select medicine to delete" />
+                </SelectTrigger>
+                <SelectContent>
+                  {medicines.map((medicine) => (
+                    <SelectItem key={medicine.id} value={medicine.id}>
+                      {medicine.name} {medicine.strength ? `· ${medicine.strength}` : ""}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <Button type="button" variant="destructive" onClick={deleteMedicine}>
+                Delete
+              </Button>
+            </div>
+            <p className="mt-2 text-xs text-muted-foreground">
+              Deletion is local to this app installation. You can add the medicine again anytime.
+            </p>
+          </div>
+        </div>
+      )}
     </Card>
   );
 }
