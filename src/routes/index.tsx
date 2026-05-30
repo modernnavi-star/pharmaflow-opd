@@ -87,8 +87,31 @@ type StockEntry = {
 
 const today = () => new Date().toISOString().slice(0, 10);
 const LOCAL_STOCK_KEY = "pharmastock-local-stocks";
+const LOCAL_ENTRIES_KEY = "pharmastock-local-entries";
+
+type PackType = "tablets" | "sheets" | "boxes";
 
 type LocalStockMap = Record<string, number>;
+
+type LocalReportEntry = {
+  id: string;
+  medicine_id: string;
+  medicine_name: string;
+  generic_name: string | null;
+  category: string | null;
+  entry_date: string;
+  opening_stock: number;
+  received: number;
+  dispensed: number;
+  closing_stock: number;
+  batch_no: string | null;
+  expiry_date: string | null;
+  received_pack_type: PackType;
+  received_pack_qty: number;
+  issue_pack_type: PackType;
+  issue_pack_qty: number;
+  notes: string | null;
+};
 
 const getLocalStocks = (): LocalStockMap => {
   if (typeof window === "undefined") return {};
@@ -104,6 +127,33 @@ const setLocalStock = (medicineId: string, stock: number) => {
   const localStocks = getLocalStocks();
   localStocks[medicineId] = stock;
   window.localStorage.setItem(LOCAL_STOCK_KEY, JSON.stringify(localStocks));
+};
+
+const getLocalEntries = (): LocalReportEntry[] => {
+  if (typeof window === "undefined") return [];
+  try {
+    return JSON.parse(window.localStorage.getItem(LOCAL_ENTRIES_KEY) ?? "[]") as LocalReportEntry[];
+  } catch {
+    return [];
+  }
+};
+
+const upsertLocalEntry = (entry: LocalReportEntry) => {
+  if (typeof window === "undefined") return;
+  const entries = getLocalEntries();
+  const existingIndex = entries.findIndex((e) => e.id === entry.id);
+  if (existingIndex >= 0) entries[existingIndex] = entry;
+  else entries.push(entry);
+  window.localStorage.setItem(LOCAL_ENTRIES_KEY, JSON.stringify(entries));
+};
+
+const packToUnits = (packType: PackType, quantity: number, unitsPerPack: number) =>
+  packType === "tablets" ? quantity : quantity * Math.max(1, unitsPerPack || 1);
+
+const packLabel = (packType: PackType) => {
+  if (packType === "boxes") return "boxes";
+  if (packType === "sheets") return "sheets";
+  return "tablets/units";
 };
 
 const getEmbeddedMedicines = (): Medicine[] => {
@@ -188,6 +238,7 @@ export function StockApp() {
 
       <main className="mx-auto w-full max-w-6xl px-4 pb-24 pt-6 sm:pt-8">
         <StatsRow stats={stats} />
+        <ReportsSection date={date} medicines={medicines} />
 
         <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:items-center">
           <div className="relative flex-1">
@@ -277,6 +328,113 @@ export function StockApp() {
           loadMedicines();
         }}
       />
+    </div>
+  );
+}
+
+function ReportsSection({ date, medicines }: { date: string; medicines: Medicine[] }) {
+  const [mode, setMode] = useState<"daily" | "monthly" | "yearly">("daily");
+  const [entries, setEntries] = useState<LocalReportEntry[]>([]);
+
+  useEffect(() => {
+    setEntries(getLocalEntries());
+  }, [date, medicines]);
+
+  const filteredEntries = useMemo(() => {
+    return entries.filter((entry) => {
+      if (mode === "daily") return entry.entry_date === date;
+      if (mode === "monthly") return entry.entry_date.slice(0, 7) === date.slice(0, 7);
+      return entry.entry_date.slice(0, 4) === date.slice(0, 4);
+    });
+  }, [date, entries, mode]);
+
+  const report = useMemo(() => {
+    const received = filteredEntries.reduce((sum, entry) => sum + entry.received, 0);
+    const issued = filteredEntries.reduce((sum, entry) => sum + entry.dispensed, 0);
+    const uniqueMedicines = new Set(filteredEntries.map((entry) => entry.medicine_id)).size;
+    const expiringSoon = filteredEntries.filter((entry) => {
+      if (!entry.expiry_date) return false;
+      const days = (new Date(entry.expiry_date).getTime() - Date.now()) / 86400000;
+      return days >= 0 && days <= 90;
+    }).length;
+    return { received, issued, uniqueMedicines, expiringSoon };
+  }, [filteredEntries]);
+
+  const title =
+    mode === "daily"
+      ? `Daily report · ${date}`
+      : mode === "monthly"
+        ? `Monthly report · ${date.slice(0, 7)}`
+        : `Yearly report · ${date.slice(0, 4)}`;
+
+  return (
+    <Card className="mt-4 p-3">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <div className="text-sm font-semibold">Reports</div>
+          <div className="text-xs text-muted-foreground">{title}</div>
+        </div>
+        <div className="grid grid-cols-3 gap-1 rounded-lg bg-muted p-1">
+          {(["daily", "monthly", "yearly"] as const).map((item) => (
+            <Button
+              key={item}
+              type="button"
+              size="sm"
+              variant={mode === item ? "default" : "ghost"}
+              className="h-8 capitalize"
+              onClick={() => setMode(item)}
+            >
+              {item}
+            </Button>
+          ))}
+        </div>
+      </div>
+
+      <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
+        <ReportStat label="Inward" value={report.received} />
+        <ReportStat label="Issued" value={report.issued} />
+        <ReportStat label="Drug items" value={report.uniqueMedicines} />
+        <ReportStat label="Expiring ≤90d" value={report.expiringSoon} />
+      </div>
+
+      {filteredEntries.length > 0 && (
+        <div className="mt-3 overflow-hidden rounded-lg border border-border">
+          <div className="grid grid-cols-[1fr_auto_auto] gap-2 bg-muted px-3 py-2 text-xs font-medium text-muted-foreground">
+            <span>Drug / batch</span>
+            <span>In</span>
+            <span>Issue</span>
+          </div>
+          {filteredEntries
+            .slice(-6)
+            .reverse()
+            .map((entry) => (
+              <div
+                key={entry.id}
+                className="grid grid-cols-[1fr_auto_auto] gap-2 border-t border-border px-3 py-2 text-xs"
+              >
+                <div className="min-w-0">
+                  <div className="truncate font-medium">{entry.medicine_name}</div>
+                  <div className="truncate text-muted-foreground">
+                    {entry.entry_date}
+                    {entry.batch_no ? ` · Batch ${entry.batch_no}` : ""}
+                    {entry.expiry_date ? ` · Exp ${entry.expiry_date}` : ""}
+                  </div>
+                </div>
+                <span className="tabular-nums text-success">{entry.received}</span>
+                <span className="tabular-nums text-destructive">{entry.dispensed}</span>
+              </div>
+            ))}
+        </div>
+      )}
+    </Card>
+  );
+}
+
+function ReportStat({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="rounded-lg border border-border bg-background p-2">
+      <div className="text-[11px] uppercase tracking-wide text-muted-foreground">{label}</div>
+      <div className="text-lg font-semibold tabular-nums">{value.toLocaleString()}</div>
     </div>
   );
 }
@@ -404,20 +562,42 @@ function EntryDialog({
   onSaved: () => void;
 }) {
   const [opening, setOpening] = useState(0);
-  const [received, setReceived] = useState(0);
-  const [dispensed, setDispensed] = useState(0);
+  const [receivedPackType, setReceivedPackType] = useState<PackType>("tablets");
+  const [receivedPackQty, setReceivedPackQty] = useState(0);
+  const [receivedUnitsPerPack, setReceivedUnitsPerPack] = useState(10);
+  const [issuePackType, setIssuePackType] = useState<PackType>("tablets");
+  const [issuePackQty, setIssuePackQty] = useState(0);
+  const [issueUnitsPerPack, setIssueUnitsPerPack] = useState(10);
+  const [batchNo, setBatchNo] = useState("");
+  const [expiryDate, setExpiryDate] = useState("");
   const [notes, setNotes] = useState("");
   const [existingId, setExistingId] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [loading, setLoading] = useState(false);
 
+  const received = packToUnits(receivedPackType, receivedPackQty, receivedUnitsPerPack);
+  const dispensed = packToUnits(issuePackType, issuePackQty, issueUnitsPerPack);
   const closing = Math.max(0, opening + received - dispensed);
+
+  const setReceivedUnits = (units: number) => {
+    setReceivedPackType("tablets");
+    setReceivedPackQty(units);
+    setReceivedUnitsPerPack(10);
+  };
+
+  const setIssueUnits = (units: number) => {
+    setIssuePackType("tablets");
+    setIssuePackQty(units);
+    setIssueUnitsPerPack(10);
+  };
 
   useEffect(() => {
     if (!medicine) return;
     setSaving(false);
     setLoading(true);
     setNotes("");
+    setBatchNo("");
+    setExpiryDate("");
     setExistingId(null);
     (async () => {
       try {
@@ -432,8 +612,8 @@ function EntryDialog({
           const e = existing as StockEntry;
           setExistingId(e.id);
           setOpening(e.opening_stock);
-          setReceived(e.received);
-          setDispensed(e.dispensed);
+          setReceivedUnits(e.received);
+          setIssueUnits(e.dispensed);
           setNotes(e.notes ?? "");
         } else {
           const { data: prev } = await supabase
@@ -445,14 +625,14 @@ function EntryDialog({
             .limit(1)
             .maybeSingle();
           setOpening(prev?.closing_stock ?? medicine.current_stock);
-          setReceived(0);
-          setDispensed(0);
+          setReceivedUnits(0);
+          setIssueUnits(0);
         }
       } catch (error) {
         console.info("Using local stock entry mode", error);
         setOpening(medicine.current_stock);
-        setReceived(0);
-        setDispensed(0);
+        setReceivedUnits(0);
+        setIssueUnits(0);
       }
       setLoading(false);
     })();
@@ -466,6 +646,18 @@ function EntryDialog({
       return;
     }
     setSaving(true);
+    const inwardDetails = [
+      received > 0 && batchNo.trim() ? `Batch: ${batchNo.trim()}` : null,
+      received > 0 && expiryDate ? `Expiry: ${expiryDate}` : null,
+      received > 0
+        ? `Inward: ${receivedPackQty} ${packLabel(receivedPackType)} = ${received} ${medicine.unit}`
+        : null,
+      dispensed > 0
+        ? `Issue: ${issuePackQty} ${packLabel(issuePackType)} = ${dispensed} ${medicine.unit}`
+        : null,
+      notes.trim() || null,
+    ].filter(Boolean);
+
     const payload = {
       medicine_id: medicine.id,
       entry_date: date,
@@ -473,7 +665,7 @@ function EntryDialog({
       received,
       dispensed,
       closing_stock: closing,
-      notes: notes.trim() || null,
+      notes: inwardDetails.join("\n") || null,
     };
     try {
       const res = existingId
@@ -482,8 +674,27 @@ function EntryDialog({
       if (res.error) throw res.error;
     } catch (error) {
       console.info("Saving stock locally because Supabase is unavailable", error);
-      setLocalStock(medicine.id, closing);
     }
+    setLocalStock(medicine.id, closing);
+    upsertLocalEntry({
+      id: `${medicine.id}-${date}`,
+      medicine_id: medicine.id,
+      medicine_name: medicine.name,
+      generic_name: medicine.generic_name,
+      category: medicine.category,
+      entry_date: date,
+      opening_stock: opening,
+      received,
+      dispensed,
+      closing_stock: closing,
+      batch_no: received > 0 ? batchNo.trim() || null : null,
+      expiry_date: received > 0 ? expiryDate || null : null,
+      received_pack_type: receivedPackType,
+      received_pack_qty: receivedPackQty,
+      issue_pack_type: issuePackType,
+      issue_pack_qty: issuePackQty,
+      notes: notes.trim() || null,
+    });
     setSaving(false);
     toast.success(`Saved entry for ${medicine.name}`);
     onSaved();
@@ -523,17 +734,53 @@ function EntryDialog({
               setValue={setOpening}
               unit={medicine.unit}
             />
-            <NumberField
-              label="Received today"
-              value={received}
-              setValue={setReceived}
+            <PackQuantityField
+              label="Inward / received stock"
+              packType={receivedPackType}
+              setPackType={setReceivedPackType}
+              quantity={receivedPackQty}
+              setQuantity={setReceivedPackQty}
+              unitsPerPack={receivedUnitsPerPack}
+              setUnitsPerPack={setReceivedUnitsPerPack}
+              calculatedUnits={received}
               unit={medicine.unit}
               tone="success"
             />
-            <NumberField
-              label="Dispensed today"
-              value={dispensed}
-              setValue={setDispensed}
+
+            {received > 0 && (
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                <div>
+                  <Label htmlFor="batch-no">Batch no.</Label>
+                  <Input
+                    id="batch-no"
+                    value={batchNo}
+                    onChange={(e) => setBatchNo(e.target.value.slice(0, 80))}
+                    placeholder="e.g. B2026A"
+                    className="mt-1 h-10"
+                  />
+                </div>
+                <div>
+                  <Label htmlFor="expiry-date">Expiry date</Label>
+                  <Input
+                    id="expiry-date"
+                    type="date"
+                    value={expiryDate}
+                    onChange={(e) => setExpiryDate(e.target.value)}
+                    className="mt-1 h-10"
+                  />
+                </div>
+              </div>
+            )}
+
+            <PackQuantityField
+              label="Stock issue / dispensed"
+              packType={issuePackType}
+              setPackType={setIssuePackType}
+              quantity={issuePackQty}
+              setQuantity={setIssuePackQty}
+              unitsPerPack={issueUnitsPerPack}
+              setUnitsPerPack={setIssueUnitsPerPack}
+              calculatedUnits={dispensed}
               unit={medicine.unit}
               tone="destructive"
             />
@@ -588,6 +835,105 @@ function EntryDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+function PackQuantityField({
+  label,
+  packType,
+  setPackType,
+  quantity,
+  setQuantity,
+  unitsPerPack,
+  setUnitsPerPack,
+  calculatedUnits,
+  unit,
+  tone,
+}: {
+  label: string;
+  packType: PackType;
+  setPackType: (value: PackType) => void;
+  quantity: number;
+  setQuantity: (value: number) => void;
+  unitsPerPack: number;
+  setUnitsPerPack: (value: number) => void;
+  calculatedUnits: number;
+  unit: string;
+  tone?: "success" | "destructive";
+}) {
+  const bump = (delta: number) => setQuantity(Math.max(0, quantity + delta));
+
+  return (
+    <div className="rounded-lg border border-border bg-muted/20 p-3">
+      <div className="flex items-center justify-between gap-2">
+        <Label className="text-sm">{label}</Label>
+        <Badge variant="secondary" className="tabular-nums">
+          {calculatedUnits} {unit}
+        </Badge>
+      </div>
+
+      <div className="mt-2 grid grid-cols-[1fr_1.1fr] gap-2">
+        <Select value={packType} onValueChange={(value) => setPackType(value as PackType)}>
+          <SelectTrigger className="h-10">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="tablets">Tablets / units</SelectItem>
+            <SelectItem value="sheets">Sheets</SelectItem>
+            <SelectItem value="boxes">Boxes</SelectItem>
+          </SelectContent>
+        </Select>
+
+        <div className="flex items-stretch gap-1">
+          <Button
+            type="button"
+            variant="outline"
+            size="icon"
+            className="h-10 w-10 shrink-0"
+            onClick={() => bump(-1)}
+          >
+            <Minus className="size-4" />
+          </Button>
+          <Input
+            type="number"
+            inputMode="numeric"
+            min={0}
+            value={quantity}
+            onChange={(e) => setQuantity(Math.max(0, Number(e.target.value) || 0))}
+            className={cn(
+              "h-10 text-center font-semibold tabular-nums",
+              tone === "success" && "border-success/40",
+              tone === "destructive" && "border-destructive/40",
+            )}
+          />
+          <Button
+            type="button"
+            variant="outline"
+            size="icon"
+            className="h-10 w-10 shrink-0"
+            onClick={() => bump(1)}
+          >
+            <Plus className="size-4" />
+          </Button>
+        </div>
+      </div>
+
+      {packType !== "tablets" && (
+        <div className="mt-2">
+          <Label className="text-xs text-muted-foreground">
+            {packType === "sheets" ? "Tablets/units per sheet" : "Tablets/units per box"}
+          </Label>
+          <Input
+            type="number"
+            inputMode="numeric"
+            min={1}
+            value={unitsPerPack}
+            onChange={(e) => setUnitsPerPack(Math.max(1, Number(e.target.value) || 1))}
+            className="mt-1 h-10 text-center font-semibold tabular-nums"
+          />
+        </div>
+      )}
+    </div>
   );
 }
 
